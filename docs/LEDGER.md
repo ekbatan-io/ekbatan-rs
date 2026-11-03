@@ -33,8 +33,8 @@ the database), linted, and committed before the next starts.
 
 | # | Item | Java / Python reference | Status |
 |---|---|---|---|
-| 1 | Clock: `Clock`, `SystemClock`, `VirtualClock` (frozen / skewed / real time); UTC, microseconds | `ekbatan-test-support` `VirtualClock`; py `clock.py`, `time.py` | in progress |
-| 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[model_event]`, `#[repository]` macros on this crate; `EntityRepository`; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | |
+| 1 | Clock: `Clock`, `SystemClock`, `VirtualClock` (frozen / skewed / real time); UTC, microseconds | `ekbatan-test-support` `VirtualClock`; py `clock.py`, `time.py` | done (EKB-0005) |
+| 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[model_event]`, `#[repository]` macros on this crate; `EntityRepository`; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | next |
 | 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | |
 | 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | |
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | |

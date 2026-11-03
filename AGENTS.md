@@ -14,6 +14,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `repository.rs` `ModelRepository`: Java's `AbstractRepository`, with the database selectors.
   - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout).
   - `types.rs` `DbUuid`: UUID columns on every database (Java's `UuidStringConverter`).
+  - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
+- `ekbatan-test-support/` - what tests of an app use: `VirtualClock` (Java's, case for case).
 - `wallet-example/` - the wallet model, its schema and repository, and the tests on real databases.
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.
 - `docs/LEDGER.md` - what is done, what is next, and decisions taken.

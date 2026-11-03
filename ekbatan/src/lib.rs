@@ -10,6 +10,7 @@
 //! - `Db`: where statements run and which SQL to write: jOOQ's `DSLContext`.
 //! - `ModelRepository`: Java's `AbstractRepository`, with the database selectors.
 
+mod clock;
 mod config;
 mod connection;
 mod db;
@@ -20,6 +21,7 @@ mod shard;
 mod transaction;
 mod types;
 
+pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
 pub use config::DataSourceConfig;
 pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
