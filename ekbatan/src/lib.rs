@@ -21,6 +21,7 @@ mod error;
 mod ids_json;
 pub mod json;
 pub mod keyed_lock;
+pub mod local_event_handler;
 pub mod migration;
 mod registry;
 mod repository;
@@ -35,7 +36,7 @@ pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
 pub use domain::{
     AnyModelEvent, Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase,
-    ModelBuilderBase, ModelEvent, ModelId, Persistable,
+    ModelBuilderBase, ModelEvent, ModelId, Persistable, event_type_name,
 };
 pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};

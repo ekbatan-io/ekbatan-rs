@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-pub use config::JobsConfig;
+pub use config::{JobsConfig, parse_iso_duration};
 pub use schedule::Schedule;
 
 use crate::{Clock, ConnectionProvider, Error, Instant, SystemClock};
@@ -69,6 +69,7 @@ pub struct ExecutionContext {
     task_name: String,
     execution_time: Instant,
     heartbeat: Arc<HeartbeatState>,
+    stopping: watch::Receiver<bool>,
 }
 
 impl ExecutionContext {
@@ -79,6 +80,24 @@ impl ExecutionContext {
     /// The slot this execution was due at.
     pub fn execution_time(&self) -> Instant {
         self.execution_time
+    }
+
+    /// Whether the registry is stopping: Java's `getSchedulerState().isShuttingDown()`. A job
+    /// that loops should end its loop.
+    pub fn is_shutting_down(&self) -> bool {
+        *self.stopping.borrow()
+    }
+
+    /// Sleeps for `duration`, or until the registry starts stopping, whichever is first.
+    pub async fn sleep(&self, duration: Duration) {
+        let mut stopping = self.stopping.clone();
+        if *stopping.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => {}
+            _ = stopping.changed() => {}
+        }
     }
 
     /// This execution's heartbeat standing: Java's `getHeartbeatState()`.
@@ -141,6 +160,7 @@ struct Running {
 }
 
 struct Shared {
+    stopping: watch::Receiver<bool>,
     store: Store,
     jobs: Vec<Job>,
     clock: Arc<dyn Clock>,
@@ -381,9 +401,10 @@ impl JobRegistryBuilder {
                 "missedHeartbeatsLimit must be at least 4".to_owned(),
             ));
         }
-        let (stop, _) = watch::channel(false);
+        let (stop, stopping) = watch::channel(false);
         Ok(JobRegistry {
             shared: Arc::new(Shared {
+                stopping,
                 store: Store::new(connection_provider),
                 jobs: self.jobs,
                 clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
@@ -479,6 +500,7 @@ impl Shared {
             task_name: name.clone(),
             execution_time: claimed.execution_time,
             heartbeat,
+            stopping: self.stopping.clone(),
         };
         info!("Job '{name}' execution started");
         let outcome = job.job.execute(&ctx).await;

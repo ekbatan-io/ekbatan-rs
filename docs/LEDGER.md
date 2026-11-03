@@ -54,6 +54,9 @@
 - Distributed jobs and keyed locks (item 9): `distributed_jobs` (db-scheduler's claim and
   heartbeat on `scheduled_tasks`, `JobRegistry`, `Schedule`, `JobsConfig`), `keyed_lock`
   (in-process, PostgreSQL advisory, MySQL/MariaDB `GET_LOCK`). No Redis lock provider yet.
+- Local event handler (item 8): `EventHandler` / `EventEnvelope` / `EventHandlerRegistry`,
+  `EventFanoutJob`, `EventHandlingJob` (backoff, retention, expiry),
+  `EventNotificationRepository` on `eventlog.event_notifications`, `LocalEventHandlerConfig`.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -72,7 +75,7 @@ the database), linted, and committed before the next starts.
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | done (EKB-0008) |
 | 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | done (EKB-0009) |
 | 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | done (EKB-0011); file format open |
-| 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | |
+| 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | done (EKB-0014) |
 | 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | done (EKB-0012, EKB-0013); Redis lock open |
 | 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | |
 | 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | |

@@ -148,3 +148,23 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    to the pool), so a lock the database grants late dies with the session.
 4. A lease dropped without `release()` is released in the background.
 5. No Redis provider (Java has `ekbatan-keyed-lock-redis`): would be a new dependency; ask.
+
+## Item 8: local event handler (2026-11-03)
+
+1. Java's design as is: `EventFanoutJob` (undelivered events -> one `event_notifications` row
+   per handler, events marked delivered, one transaction per shard) and `EventHandlingJob`
+   (handlers run on due rows; backoff 30s doubling, capped at 5 min; retention window 7 days,
+   expiring before a run or after a failure), both distributed jobs looping until the
+   registry stops. Java's defaults for poll delays and batch sizes.
+2. **A handler names its event type in Rust's type system** (`type Event = ...`) instead of
+   Java's `eventType()` returning a class; the payload is read with serde, so the payload's
+   `modelId` / `modelName` keys are ignored by the event struct (they are on the envelope).
+3. **`ExecutionContext` gained `is_shutting_down()` and `sleep()`** (Java's
+   `getSchedulerState().isShuttingDown()`), so looping jobs end when the registry stops.
+4. A handler error is logged and retried; a handler that panics is not caught (Java catches
+   `Throwable`). Kept so a panic stays loud; the job's loop ends, and the scheduler runs it again
+   on its next slot.
+5. No metrics yet (Java counts fan-out and handling in OpenTelemetry): item 10.
+6. `LocalEventHandlerConfig` reads `ekbatan.local-event-handler` (Java's keys; ISO-8601
+   durations); `handling.enabled` is off unless set, as in Java. Wiring the jobs into a
+   `JobRegistry` is the app's (Java's DI does it); the example shows it.

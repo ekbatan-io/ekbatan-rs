@@ -229,7 +229,7 @@ fn events_table() -> (Alias, Alias) {
 }
 
 /// A JSON value to write: `jsonb` on PostgreSQL; text on MySQL and MariaDB, stored as given.
-fn json_value(dialect: Dialect, text: Option<String>) -> SimpleExpr {
+pub(crate) fn json_value(dialect: Dialect, text: Option<String>) -> SimpleExpr {
     let value = Expr::val(text);
     match dialect {
         Dialect::Postgres => value.cast_as(Alias::new("jsonb")),
@@ -238,7 +238,7 @@ fn json_value(dialect: Dialect, text: Option<String>) -> SimpleExpr {
 }
 
 /// A JSON column read back as text.
-fn json_text(dialect: Dialect, column: &str) -> SimpleExpr {
+pub(crate) fn json_text(dialect: Dialect, column: &str) -> SimpleExpr {
     let column = Expr::col(Alias::new(column));
     match dialect {
         Dialect::Postgres => column.cast_as(Alias::new("text")),
@@ -297,6 +297,52 @@ impl EventEntityRepository {
             .from(events_table())
             .to_owned();
         db.fetch_scalar(&select).await
+    }
+
+    /// Up to `limit` undelivered events of the given types, oldest first: Java's
+    /// `findUndelivered`. Rows with no event (an action that emitted none) never match.
+    pub async fn find_undelivered(
+        db: &mut Db<'_>,
+        event_types: &[String],
+        limit: u64,
+    ) -> Result<Vec<EventEntity>, Error> {
+        if event_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut select = Self::select(db.dialect());
+        select
+            .and_where(Expr::col(Alias::new("delivered")).eq(false))
+            .and_where(Expr::col(Alias::new("event_type")).is_in(event_types.iter().cloned()))
+            .order_by(Alias::new("event_date"), sea_query::Order::Asc)
+            .limit(limit);
+        let rows: Vec<EventRow> = db.fetch_all(&select).await?;
+        Ok(rows.into_iter().map(EventEntity::from).collect())
+    }
+
+    /// Java's `markDelivered`.
+    pub async fn mark_delivered(db: &mut Db<'_>, ids: &[Uuid]) -> Result<u64, Error> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let update = Query::update()
+            .table(events_table())
+            .value(Alias::new("delivered"), true)
+            .and_where(Expr::col(Alias::new("id")).is_in(ids.iter().copied()))
+            .to_owned();
+        db.execute(&update).await
+    }
+
+    fn select(dialect: Dialect) -> sea_query::SelectStatement {
+        let mut select = Query::select();
+        select.from(events_table());
+        for column in COLUMNS {
+            if column == "action_params" || column == "payload" {
+                select.expr_as(json_text(dialect, column), Alias::new(column));
+            } else {
+                select.column(Alias::new(column));
+            }
+        }
+        select
     }
 
     async fn find(db: &mut Db<'_>, action_id: Option<Uuid>) -> Result<Vec<EventEntity>, Error> {

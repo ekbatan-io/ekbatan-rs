@@ -19,6 +19,7 @@ pub use event_persister::{
     EmittedEvent, EventEntity, EventEntityRepository, EventPersister,
     SingleTableJsonEventPersister, event_payload,
 };
+pub(crate) use event_persister::{json_text, json_value};
 pub use executor::{ActionExecutor, ActionExecutorBuilder};
 pub use plan::{ActionPlan, AnyChanges, PersistableChanges};
 pub use repository_registry::{AnyRepository, RepositoryRegistry, RepositoryRegistryBuilder};

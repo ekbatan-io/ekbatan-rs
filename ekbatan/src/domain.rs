@@ -438,6 +438,12 @@ impl GenericState {
 }
 
 /// `wallet_example::model::WalletCreatedEvent` -> `WalletCreatedEvent`: Java's simple class name.
+/// The event type name an event of type `E` is logged under: its simple type name, as Java's
+/// `getSimpleName()`.
+pub fn event_type_name<E: AnyModelEvent>() -> &'static str {
+    short_name(std::any::type_name::<E>())
+}
+
 pub(crate) fn short_name(full: &'static str) -> &'static str {
     full.rsplit("::").next().unwrap_or(full)
 }

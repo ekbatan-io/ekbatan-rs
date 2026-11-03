@@ -60,6 +60,11 @@ impl DatabaseRegistry {
         )
     }
 
+    /// Every configured shard, in order: Java's `allTransactionManagers()` by key.
+    pub fn shards(&self) -> Vec<ShardIdentifier> {
+        self.transaction_managers.keys().copied().collect()
+    }
+
     /// Java's `withUnknownShardPolicy(policy)`.
     pub fn with_unknown_shard_policy(mut self, policy: UnknownShardPolicy) -> Self {
         self.unknown_shard_policy = policy;

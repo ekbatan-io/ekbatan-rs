@@ -17,6 +17,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `migration.rs` `Migrator`: Java's `FlywayMigrator` on sqlx's migrator (Flyway file names).
   - `distributed_jobs/` `JobRegistry`, `DistributedJob`: run-once-per-slot jobs on
     `scheduled_tasks` (db-scheduler's design, our code).
+  - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
+    `eventlog.event_notifications`.
   - `keyed_lock.rs` `KeyedLockProvider`: in-process and database keyed locks.
   - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
   - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
