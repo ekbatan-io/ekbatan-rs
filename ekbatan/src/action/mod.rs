@@ -3,7 +3,6 @@
 
 pub(crate) mod config;
 pub(crate) mod event_persister;
-mod executor;
 pub(crate) mod plan;
 pub(crate) mod repository_registry;
 
@@ -11,54 +10,17 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::Serialize;
-
 pub use config::{ExecutionConfiguration, RetryConfig, RetryOn};
 pub use event_persister::{
     EmittedEvent, EventEntity, EventEntityRepository, EventPersister,
     SingleTableJsonEventPersister, event_payload,
 };
 pub(crate) use event_persister::{json_text, json_value};
-pub use executor::{ActionExecutor, ActionExecutorBuilder};
 pub use plan::{ActionPlan, AnyChanges, PersistableChanges};
 pub use repository_registry::{AnyRepository, RepositoryRegistry, RepositoryRegistryBuilder};
 
 use crate::Error;
 use crate::aio::AsyncAction;
-
-/// One unit of domain work: Java's `Action<PARAM, RESULT>`. One instance serves every call, so
-/// it holds only what its constructor gave it (repositories, a clock); what one call stages goes
-/// on the `plan` it is handed.
-///
-/// `perform` returns `Err` to abort: nothing it staged is written. An app's own error goes in
-/// `Error::action(...)`. Every `Action` is also an `AsyncAction` (its async twin), so it
-/// registers with `ActionRegistry::builder().with_action(...)` like any other.
-pub trait Action: Send + Sync + 'static {
-    /// The input. Written to the event log as JSON, so it must serialize to a JSON object.
-    type Params: Serialize + Send + Sync;
-    type Result: Send;
-
-    fn perform(
-        &self,
-        plan: &mut ActionPlan,
-        principal: Option<&str>,
-        params: &Self::Params,
-    ) -> Result<Self::Result, Error>;
-}
-
-impl<A: Action> AsyncAction for A {
-    type Params = A::Params;
-    type Result = A::Result;
-
-    async fn perform(
-        &self,
-        plan: &mut ActionPlan,
-        principal: Option<&str>,
-        params: &A::Params,
-    ) -> Result<A::Result, Error> {
-        tokio::task::block_in_place(|| Action::perform(self, plan, principal, params))
-    }
-}
 
 /// The simple name of an action type, as Java's `getSimpleName()`: the event log's
 /// `action_name`.

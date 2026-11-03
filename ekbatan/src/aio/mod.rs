@@ -1,7 +1,7 @@
-//! The async API: the `Async*` twins of the plain (sync) names, waited on with `.await`
+//! The async API: the `Async*` twins of `ekbatan::blocking`'s names, waited on with `.await`
 //! (Python's `ekbatan.aio`). An async app uses these. Everything else (models, events, plans,
-//! registries, ids, sharding, config, migrations) is shared with the sync API as it is, and so is
-//! every rule: this async code is the engine, and the sync API waits on it.
+//! registries, ids, sharding, config, migrations) is shared with the blocking API as it is, and so is
+//! every rule: this async code is the engine, and the blocking API waits on it.
 
 mod action;
 pub(crate) mod db;

@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
-use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::notification::EventNotification;
 use crate::aio::AsyncEventHandler;
-use crate::{AnyModelEvent, Error, Instant, event_type_name};
+use crate::{Error, Instant, event_type_name};
 
 /// One delivery: the event, and the action it came from. Java's `EventEnvelope`.
 #[derive(Clone, Debug)]
@@ -27,41 +26,6 @@ pub struct EventEnvelope<E> {
     pub model_id: Option<String>,
     pub model_type: Option<String>,
     pub event_date: Instant,
-}
-
-/// Reacts to one event type: Java's `EventHandler<E>`. It is also an `AsyncEventHandler` (its
-/// async twin), so it goes in the same
-/// `EventHandlerRegistry` with `with_handler(...)`.
-pub trait EventHandler: Send + Sync + 'static {
-    /// The event type this handler subscribes to.
-    type Event: AnyModelEvent + DeserializeOwned + Send;
-
-    /// Stable across deploys: stored on each notification row.
-    fn name(&self) -> String;
-
-    /// Former names whose queued rows still route here (lookup only): for renaming a handler.
-    fn aliases(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// One delivery. An `Err` is a failure: retried later, until the retention window ends.
-    fn handle(&self, envelope: EventEnvelope<Self::Event>) -> Result<(), Error>;
-}
-
-impl<H: EventHandler> AsyncEventHandler for H {
-    type Event = H::Event;
-
-    fn name(&self) -> String {
-        EventHandler::name(self)
-    }
-
-    fn aliases(&self) -> Vec<String> {
-        EventHandler::aliases(self)
-    }
-
-    async fn handle(&self, envelope: EventEnvelope<H::Event>) -> Result<(), Error> {
-        tokio::task::block_in_place(|| EventHandler::handle(self, envelope))
-    }
 }
 
 /// A handler, whatever its event type.

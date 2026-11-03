@@ -1,5 +1,5 @@
-//! `AsyncEventHandler`: an event handler whose `handle` is awaited. `EventHandler` is its sync
-//! twin; every `EventHandler` is also an `AsyncEventHandler`.
+//! `AsyncEventHandler`: an event handler whose `handle` is awaited. `blocking::EventHandler` is its
+//! blocking twin; every `EventHandler` is also an `AsyncEventHandler`.
 
 use std::future::Future;
 

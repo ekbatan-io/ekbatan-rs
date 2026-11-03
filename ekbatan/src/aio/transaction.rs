@@ -1,5 +1,5 @@
 //! `AsyncTransaction` and `AsyncTransactionManager`: transactions waited on with `.await`.
-//! `Transaction` and `TransactionManager`'s `begin` / `in_transaction` are their sync twins.
+//! `blocking::Transaction` and `TransactionManager::begin` / `in_transaction` are the blocking twins.
 
 use crate::{AsyncDb, Connection, Dialect, Error, ShardIdentifier, TransactionManager};
 

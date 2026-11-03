@@ -5,7 +5,7 @@
 //! - `tx_db_else_db(tx, key)`: the caller's transaction if given one, else the primary.
 //!
 //! The ready-made methods (`find_by_id`, `get_by_id`, `exists_by_id`, `find_all_where`,
-//! `count_where`, `add`, `update`, ...) come from `ekbatan::Repository` (sync) and `ekbatan::aio::AsyncRepository` (async, used
+//! `count_where`, `add`, `update`, ...) come from `ekbatan::blocking::Repository` and `ekbatan::aio::AsyncRepository` (async, used
 //! here); a repository implements `AbstractRepository`.
 
 use std::cmp::Reverse;

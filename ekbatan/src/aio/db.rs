@@ -1,5 +1,5 @@
 //! `AsyncDb`: where statements run and which SQL to write (jOOQ's `DSLContext`), waited on
-//! with `.await`. `Db` is its sync twin.
+//! with `.await`. `blocking::Db` is its blocking twin.
 
 use futures_util::future::try_join_all;
 use sea_query::{

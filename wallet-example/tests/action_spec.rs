@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use ekbatan::{Error, Model, Persistable};
+use ekbatan_test_support::VirtualClock;
 use ekbatan_test_support::aio::AsyncActionSpec;
-use ekbatan_test_support::{ActionSpec, VirtualClock};
+use ekbatan_test_support::blocking::ActionSpec;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 use wallet_example::action::wallet_create_action::MEXICO_SHARD;
@@ -88,7 +89,7 @@ async fn a_failed_assertion_names_the_type() {
         .assert_updated_one::<Wallet>(|_| {});
 }
 
-/// A sync action: `perform` is a plain `fn`.
+/// A blocking action: `perform` is a plain `fn`.
 struct SyncOpen;
 
 #[derive(Debug)]
@@ -102,7 +103,7 @@ impl std::fmt::Display for NoNegativeBalance {
 
 impl std::error::Error for NoNegativeBalance {}
 
-impl ekbatan::action::Action for SyncOpen {
+impl ekbatan::blocking::Action for SyncOpen {
     type Params = wallet_create_action::Params;
     type Result = Wallet;
 
@@ -128,7 +129,7 @@ impl ekbatan::action::Action for SyncOpen {
 }
 
 #[test]
-fn a_sync_action_under_the_sync_spec() {
+fn a_blocking_action_under_the_blocking_spec() {
     let params = |balance| wallet_create_action::Params {
         country_code: None,
         owner_id: Uuid::new_v4(),

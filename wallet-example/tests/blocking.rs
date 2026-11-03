@@ -1,5 +1,5 @@
-//! The sync API on real databases, from plain (not async) code: sync actions in the executor,
-//! the repository, transactions, keyed locks, and a sync job and event handler in a real
+//! The blocking API on real databases, from plain (not async) code: actions in the executor,
+//! the repository, transactions, keyed locks, and a job and an event handler in a real
 //! `JobRegistry`.
 
 mod common;
@@ -10,17 +10,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ekbatan::action::{
-    Action, ActionExecutor, ActionPlan, ActionRegistry, EventEntityRepository,
-    ExecutionConfiguration, RepositoryRegistry, RetryConfig, RetryOn,
+    ActionPlan, ActionRegistry, EventEntityRepository, ExecutionConfiguration, RepositoryRegistry,
+    RetryConfig, RetryOn,
 };
-use ekbatan::distributed_jobs::{DistributedJob, ExecutionContext, JobRegistry, Schedule};
-use ekbatan::keyed_lock::{KeyedLockProvider, SqlKeyedLockProvider};
+use ekbatan::blocking::{
+    self, Action, ActionExecutor, DistributedJob, EventHandler, KeyedLockProvider, Repository,
+    block_on,
+};
+use ekbatan::distributed_jobs::{ExecutionContext, JobRegistry, Schedule};
+use ekbatan::keyed_lock::SqlKeyedLockProvider;
 use ekbatan::local_event_handler::{
-    EventEnvelope, EventFanoutJob, EventHandler, EventHandlerRegistry, EventHandlingJob,
+    EventEnvelope, EventFanoutJob, EventHandlerRegistry, EventHandlingJob,
 };
 use ekbatan::{
-    Clock, ConnectionProvider, DatabaseRegistry, Dialect, Error, Model, Persistable, Repository,
-    ShardedId, SystemClock, block_on, blocking_runtime,
+    Clock, ConnectionProvider, DatabaseRegistry, Dialect, Error, Model, Persistable, ShardedId,
+    SystemClock,
 };
 use rust_decimal::Decimal;
 use sea_query::{Asterisk, Expr, ExprTrait, Func, Query};
@@ -442,6 +446,6 @@ fn run(dialect: Dialect) {
     say("a sync job ran on its schedule and a sync handler got every deposit; stop() ended them");
 
     registry.close();
-    let _inside = blocking_runtime().enter();
+    let _inside = blocking::runtime().enter();
     drop(cluster);
 }

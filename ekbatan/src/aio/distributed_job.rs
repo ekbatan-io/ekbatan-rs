@@ -1,5 +1,5 @@
-//! `AsyncDistributedJob`: a distributed job whose work is awaited. `DistributedJob` is its sync
-//! twin; every `DistributedJob` is also an `AsyncDistributedJob`.
+//! `AsyncDistributedJob`: a distributed job whose work is awaited. `blocking::DistributedJob` is its
+//! blocking twin; every `DistributedJob` is also an `AsyncDistributedJob`.
 
 use std::future::Future;
 

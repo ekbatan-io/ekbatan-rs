@@ -1,4 +1,4 @@
-//! `AsyncAction`: an action whose `perform` is awaited. `Action` is its sync twin; every
+//! `AsyncAction`: an action whose `perform` is awaited. `blocking::Action` is its blocking twin; every
 //! `Action` is also an `AsyncAction`.
 
 use std::future::Future;

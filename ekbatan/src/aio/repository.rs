@@ -1,5 +1,5 @@
 //! `AsyncRepository`: every repository's selectors and ready-made methods, waited on with
-//! `.await`. `Repository` is its sync twin; both are given to every `AbstractRepository`.
+//! `.await`. `blocking::Repository` is its blocking twin; both are given to every `AbstractRepository`.
 
 use std::collections::BTreeSet;
 use std::future::Future;

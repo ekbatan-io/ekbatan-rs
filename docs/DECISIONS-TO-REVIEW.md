@@ -169,44 +169,46 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    durations); `handling.enabled` is off unless set, as in Java. Wiring the jobs into a
    `JobRegistry` is the app's (Java's DI does it); the example shows it.
 
-## Sync and async APIs side by side (2026-11-04)
+## Blocking and async APIs side by side (2026-11-04)
 
-The user chose to wrap the async code (not a second, synchronous database driver), and then to
-name things as Python does: plain names sync, `Async*` names async in `ekbatan::aio`.
+The user chose to wrap the async code (not a second, synchronous database driver), then
+Python's naming, then explicit folders for both sides: `blocking` and `aio`.
 
-1. **Names, as Java and Python**: `Action`, `ActionExecutor`, `Repository`, `Db`, `Dbs`,
-   `Transaction`, `KeyedLockProvider`, `Lease`, `DistributedJob`, `EventHandler` and test
-   support's `ActionSpec` are sync, at their usual paths. Their twins are `AsyncAction`,
-   `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncDbs`, `AsyncTransaction`,
-   `AsyncKeyedLockProvider`, `AsyncLease`, `AsyncDistributedJob`, `AsyncEventHandler` in
-   `ekbatan::aio`, and `AsyncActionSpec` in `ekbatan_test_support::aio`. (`ekbatan::async` is
-   impossible: `async` is a reserved word.) The folders match, as in Python: the sync code is
-   in the topic modules (`action/`, `repository.rs`, `keyed_lock.rs`, ...), every `Async*`
-   type is in `ekbatan/src/aio/` and reachable only as `ekbatan::aio::...`.
-2. **`AbstractRepository` (Java's name) is what a repository implements**: types, `registry`,
-   `from_record`, `to_record`, `sharding_strategy`. `Repository` (sync) and `AsyncRepository`
-   are given to every `AbstractRepository`, so one repository serves both. Without that split,
-   async code needing `from_record` also pulled in the sync methods of the same names.
-3. **Shared types keep plain names, with sync methods and an async view**: `DatabaseRegistry`
-   (`primary`, `secondary`, `primaries`, `secondaries`, `close`) and `TransactionManager`
-   (`begin`, `in_transaction`) wait; `.as_async()` gives `AsyncDatabaseRegistry` /
-   `AsyncTransactionManager` (Python's names) with the `.await` versions.
-4. **One copy of every rule.** The async code is the engine; the sync API waits on it. A sync
-   `Action`, `DistributedJob` or `EventHandler` *is* an async one too (blanket impls), so it
-   registers in the same registries and runs in the same executor and jobs. The sync
+1. **Three places.** `ekbatan::blocking` (folder `ekbatan/src/blocking/`) holds the blocking
+   API under plain names: `Action`, `ActionExecutor`, `Repository`, `Db`, `Dbs`, `Transaction`,
+   `KeyedLockProvider`, `Lease`, `DistributedJob`, `EventHandler`, plus `runtime()` and
+   `block_on`. `ekbatan::aio` (`ekbatan/src/aio/`) holds the `Async*` twins. The topic modules
+   (`action/`, `repository.rs`, `keyed_lock.rs`, ...) hold only what both share: `ActionPlan`,
+   the registries, `AbstractRepository`, config, the lock providers, the job scheduler. Test
+   support: `ekbatan_test_support::blocking::ActionSpec` and `aio::AsyncActionSpec`.
+2. **Why `blocking`, not `sync`**: Rust's usual word (`reqwest::blocking`, tokio's
+   `spawn_blocking`); `sync` reads as `std::sync` (locks, `Arc`) and the `Sync` marker. `aio`
+   is Python's name and redis-rs's. (`ekbatan::async` is impossible: a reserved word.)
+3. **Names inside `blocking` are plain, `aio` ones carry `Async`**, as in Python, where the sync
+   names are unprefixed.
+4. **`AbstractRepository` (Java's name) is what a repository implements**: types, `registry`,
+   `from_record`, `to_record`, `sharding_strategy`. `blocking::Repository` and
+   `aio::AsyncRepository` are given to every `AbstractRepository`, so one repository serves
+   both. A module that imports both method traits must say which one it means.
+5. **Shared types with methods for both sides**: `DatabaseRegistry` (`primary`, `secondary`,
+   `primaries`, `secondaries`, `close`) and `TransactionManager` (`begin`, `in_transaction`)
+   have blocking methods (written in `blocking/`); `.as_async()` gives `AsyncDatabaseRegistry`
+   / `AsyncTransactionManager` (Python's names) with the `.await` versions.
+6. **One copy of every rule.** The async code is the engine; the blocking API waits on it. A
+   blocking `Action`, `DistributedJob` or `EventHandler` *is* an async one too (blanket impls),
+   so it registers in the same registries and runs in the same executor and jobs. The blocking
    `ActionExecutor` runs async actions too.
-5. **Its own tokio runtime** (`blocking_runtime()`, multi-threaded, made on first use). A pool
-   made outside any runtime is put on it. Sync code inside an action, job or handler steps off
-   the runtime thread (`block_in_place`) before waiting.
-6. **Sync API not for async code**: called from inside an async function it blocks that thread,
-   and on a single-threaded runtime it panics, as `reqwest::blocking` does. Documented, not
-   guarded.
-7. **Still async only, run with `ekbatan::block_on(...)` from sync code**: migrations
+7. **Its own tokio runtime** (`blocking::runtime()`, multi-threaded, made on first use). A pool
+   made outside any runtime is put on it. Blocking code inside an action, job or handler steps
+   off the runtime thread (`block_in_place`) before waiting.
+8. **Not for async code**: called from inside an async function the blocking API blocks that
+   thread, and on a single-threaded runtime it panics, as `reqwest::blocking` does. Documented,
+   not guarded.
+9. **Still async only, run with `blocking::block_on(...)` from blocking code**: migrations
    (`Migrator::migrate`), `JobRegistry::start` / `stop`, `ConnectionProvider::acquire` /
    `close`, the event log and notification repositories' functions, and the event jobs'
-   `drain_one_round`. These keep their names: they are not the request path (Python's `aio`
-   draws the same line), and an `Async` copy of each looked like noise. Say if you want sync
-   twins for any.
-8. **The wallet example stays async** (`AsyncAction`, `AsyncRepository`), as it was written;
-   `wallet-example/tests/sync_api.rs` shows the sync API end to end.
-9. Always compiled; no cargo feature (it adds no dependency).
+   `drain_one_round`. Not the request path (Python's `aio` draws the same line). Say if you want
+   blocking twins for any.
+10. **The wallet example stays async** (`AsyncAction`, `AsyncRepository`), as it was written;
+    `wallet-example/tests/blocking.rs` shows the blocking API end to end.
+11. Always compiled; no cargo feature (it adds no dependency).

@@ -12,7 +12,7 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `transaction.rs` `TransactionManager` (one shard's pools and transactions) and `Transaction`.
   - `registry.rs` `DatabaseRegistry`: every shard's `TransactionManager`.
   - `db.rs` `Db`: where statements run and which SQL to write (jOOQ's `DSLContext`).
-  - `action/` `Action`, `ActionPlan`, `ActionExecutor`, the registries, `ExecutionConfiguration`,
+  - `action/` `ActionPlan`, the registries, `ExecutionConfiguration`,
     and the event log (`EventPersister`, `eventlog.events`).
   - `migration.rs` `Migrator`: Java's `FlywayMigrator` on sqlx's migrator (Flyway file names).
   - `distributed_jobs/` `JobRegistry`, `DistributedJob`: run-once-per-slot jobs on
@@ -22,15 +22,17 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `aio/` the async twins, `Async*` (Python's `ekbatan.aio`): `AsyncAction`,
     `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncTransaction`,
     `AsyncTransactionManager`, `AsyncDatabaseRegistry`, `AsyncKeyedLockProvider`, `AsyncLease`,
-    `AsyncDistributedJob`, `AsyncEventHandler`. They are the engine; the plain (sync) names in
-    the topic modules wait on them.
-  - `runtime.rs` the sync API's tokio runtime, and `block_on` for calling async code from sync
-    code.
+    `AsyncDistributedJob`, `AsyncEventHandler`. They are the engine.
+  - `blocking/` the blocking twins under the plain names (Rust's `reqwest::blocking`):
+    `Action`, `ActionExecutor`, `Repository`, `Db`, `Transaction`, `KeyedLockProvider`, `Lease`,
+    `DistributedJob`, `EventHandler`; they wait on `aio`, on `blocking::runtime()`, and
+    `blocking::block_on` runs any async call from blocking code. The topic modules hold only what
+    both share.
   - `keyed_lock.rs` `KeyedLockProvider`: in-process and database keyed locks.
   - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
   - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
-  - `repository.rs` `AbstractRepository` (what a repository says about itself, Java's name) and
-    `Repository` (its selectors and ready-made methods).
+  - `repository.rs` `AbstractRepository` (what a repository says about itself, Java's name;
+    `blocking::Repository` and `aio::AsyncRepository` give it its methods).
   - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout), `ShardingStrategy`, `ShardKey`.
   - `types.rs` `DbUuid`: UUID columns on every database (Java's `UuidStringConverter`).
   - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
@@ -38,8 +40,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
 - `ekbatan-schemagen/` - generates the app's `schema.rs` in `build.rs` from a Docker database
   with the migrations applied (Java's jOOQ codegen). Building `wallet-example` needs Docker.
-- `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionSpec`, `ActionAssert`;
-  `aio::AsyncActionSpec`.
+- `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionAssert`,
+  `blocking::ActionSpec`, `aio::AsyncActionSpec`.
 - `wallet-example/` - the wallet model, schema, repositories, actions, migrations
   (`migrations/<database>`, Java's files), and the tests on real databases.
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.

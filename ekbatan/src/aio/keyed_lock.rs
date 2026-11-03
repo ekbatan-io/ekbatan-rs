@@ -1,5 +1,5 @@
 //! `AsyncKeyedLockProvider` and `AsyncLease`: keyed locks waited on with `.await`.
-//! `KeyedLockProvider` and `Lease` are their sync twins; the providers serve both.
+//! `blocking::KeyedLockProvider` and `blocking::Lease` are their blocking twins; the providers serve both.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
