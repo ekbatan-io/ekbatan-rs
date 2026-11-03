@@ -108,36 +108,71 @@ impl<M> fmt::Display for ShardedId<M> {
     }
 }
 
-/// Anything that names a shard. One selector takes any of them, which covers Java's overloads:
-/// `db(DefaultShard)` is `db()`, `db(shard)` is `db(shard)`, `db(&id)` is `db(id)`.
+/// How a repository finds the shard of an id: Java's `ShardingStrategy`. The default is
+/// `NoSharding`, as Java's repositories default to `NoShardingStrategy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShardingStrategy {
+    /// Everything on the default shard; `dbs()` is the default shard only. Java's
+    /// `NoShardingStrategy`.
+    #[default]
+    NoSharding,
+    /// The shard is in the id's bits (a version-7 UUID in `ShardedUUID`'s layout). Java's
+    /// `EmbeddedBitsShardingStrategy`.
+    EmbeddedBits,
+}
+
+impl ShardingStrategy {
+    /// Java's `usesShardAwareId()`.
+    pub fn uses_shard_aware_id(self) -> bool {
+        self == ShardingStrategy::EmbeddedBits
+    }
+
+    /// The shard an id names, if this strategy reads one from it: Java's
+    /// `resolveShardIdentifierById`. `EmbeddedBits` reads only version-7 UUIDs, as Java does.
+    pub fn resolve_shard_identifier_by_id(self, id: Uuid) -> Option<ShardIdentifier> {
+        match self {
+            ShardingStrategy::NoSharding => None,
+            ShardingStrategy::EmbeddedBits if id.get_version_num() == 7 => {
+                Some(ShardedId::<()>::from_uuid(id).shard())
+            }
+            ShardingStrategy::EmbeddedBits => None,
+        }
+    }
+}
+
+/// Anything that names a shard. A repository's selector takes any of them, which covers Java's
+/// overloads: `db(DefaultShard)` is `db()`, `db(shard)` is `db(shard)`, `db(&id)` is `db(id)`.
+/// An id names a shard through the repository's `ShardingStrategy`; `None` means the default
+/// shard.
 pub trait ShardKey {
-    fn shard(&self, default: ShardIdentifier) -> ShardIdentifier;
+    fn resolve(&self, strategy: ShardingStrategy) -> Option<ShardIdentifier>;
 }
 
 /// The registry's default shard: Java's no-argument `db()`.
 pub struct DefaultShard;
 
 impl ShardKey for DefaultShard {
-    fn shard(&self, default: ShardIdentifier) -> ShardIdentifier {
-        default
+    fn resolve(&self, _: ShardingStrategy) -> Option<ShardIdentifier> {
+        None
     }
 }
 
+/// A shard named outright, whatever the strategy, as Java's `db(ShardIdentifier)`.
 impl ShardKey for ShardIdentifier {
-    fn shard(&self, _: ShardIdentifier) -> ShardIdentifier {
-        *self
+    fn resolve(&self, _: ShardingStrategy) -> Option<ShardIdentifier> {
+        Some(*self)
     }
 }
 
 impl<M> ShardKey for ShardedId<M> {
-    fn shard(&self, _: ShardIdentifier) -> ShardIdentifier {
-        ShardedId::shard(self)
+    fn resolve(&self, strategy: ShardingStrategy) -> Option<ShardIdentifier> {
+        strategy.resolve_shard_identifier_by_id(self.value)
     }
 }
 
 impl<T: ShardKey + ?Sized> ShardKey for &T {
-    fn shard(&self, default: ShardIdentifier) -> ShardIdentifier {
-        (**self).shard(default)
+    fn resolve(&self, strategy: ShardingStrategy) -> Option<ShardIdentifier> {
+        (**self).resolve(strategy)
     }
 }
 
@@ -165,5 +200,20 @@ mod tests {
         let low = (1u64 << 63) | (((1u64 << 6) | 2) << 48);
         let id = ShardedId::<()>::from_uuid(Uuid::from_u64_pair(0x7000, low));
         assert_eq!(id.shard(), ShardIdentifier::new(1, 2));
+    }
+
+    #[test]
+    fn the_strategy_decides_whether_an_id_names_a_shard() {
+        let mexico = ShardIdentifier::new(1, 0);
+        let id = ShardedId::<()>::generate(mexico);
+        assert_eq!(id.resolve(ShardingStrategy::EmbeddedBits), Some(mexico));
+        assert_eq!(id.resolve(ShardingStrategy::NoSharding), None);
+        // EmbeddedBits reads only version-7 UUIDs, as Java's does.
+        let v4 = Uuid::new_v4();
+        assert_eq!(
+            ShardingStrategy::EmbeddedBits.resolve_shard_identifier_by_id(v4),
+            None
+        );
+        assert_eq!(mexico.resolve(ShardingStrategy::NoSharding), Some(mexico));
     }
 }

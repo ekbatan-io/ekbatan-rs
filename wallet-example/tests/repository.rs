@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use ekbatan::{
-    ConnectionProvider, DataSourceConfig, DatabaseRegistry, Dialect, Error, Model, ModelRepository,
-    ShardIdentifier, TransactionManager,
+    Clock, ConnectionProvider, DataSourceConfig, DatabaseRegistry, Dialect, Entity, Error, Model,
+    Persistable, Repository, ShardIdentifier, SystemClock, TransactionManager,
 };
 use rust_decimal::Decimal;
 use sea_query::{Asterisk, Cond, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query};
@@ -18,8 +18,8 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
-use wallet_example::model::{Wallet, WalletState};
-use wallet_example::repository::WalletRepository;
+use wallet_example::model::{Notification, NotificationState, Wallet, WalletState};
+use wallet_example::repository::{NotificationRepository, WalletRepository};
 use wallet_example::schema::{Wallets, WalletsRecord};
 
 const GLOBAL: ShardIdentifier = ShardIdentifier::new(0, 0);
@@ -37,6 +37,18 @@ const MARIADB_WALLETS: &str = "CREATE TABLE wallets (id UUID PRIMARY KEY, versio
     state VARCHAR(24) NOT NULL, owner_id UUID NOT NULL, currency CHAR(3) NOT NULL, \
     balance DECIMAL(19, 4) NOT NULL, created_date DATETIME(6) NOT NULL, updated_date DATETIME(6) NOT NULL)";
 
+// The notifications table (V0004__notifications.sql). Created on the default shard only: the
+// notification repository is unsharded, so touching any other shard would fail.
+const POSTGRES_NOTIFICATIONS: &str = "CREATE TABLE notifications (id UUID PRIMARY KEY, \
+    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id UUID NOT NULL, \
+    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL)";
+const MYSQL_NOTIFICATIONS: &str = "CREATE TABLE notifications (id CHAR(36) CHARACTER SET ascii NOT NULL, \
+    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id CHAR(36) CHARACTER SET ascii NOT NULL, \
+    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL, PRIMARY KEY (id))";
+const MARIADB_NOTIFICATIONS: &str = "CREATE TABLE notifications (id UUID PRIMARY KEY, \
+    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id UUID NOT NULL, \
+    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL)";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn on_postgres() {
     let container = Postgres::default()
@@ -52,7 +64,7 @@ async fn on_postgres() {
         password: Some("postgres"),
         first_database: "postgres",
     };
-    run_scenario(&server, POSTGRES_WALLETS).await;
+    run_scenario(&server, POSTGRES_WALLETS, POSTGRES_NOTIFICATIONS).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -70,7 +82,7 @@ async fn on_mysql() {
         password: None,
         first_database: "test",
     };
-    run_scenario(&server, MYSQL_WALLETS).await;
+    run_scenario(&server, MYSQL_WALLETS, MYSQL_NOTIFICATIONS).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -88,7 +100,7 @@ async fn on_mariadb() {
         password: None,
         first_database: "test",
     };
-    run_scenario(&server, MARIADB_WALLETS).await;
+    run_scenario(&server, MARIADB_WALLETS, MARIADB_NOTIFICATIONS).await;
 }
 
 /// The same statement, written for each database by sea-query.
@@ -156,13 +168,20 @@ impl Server {
 /// What an app builds from its config: per shard, a primary pool and a replica pool in a
 /// `TransactionManager`, all in a `DatabaseRegistry`. Here two databases on one server stand in
 /// for two shards, and a second pool on the same database stands in for the replica.
-async fn registry(server: &Server, create_wallets: &'static str) -> Arc<DatabaseRegistry> {
+async fn registry(
+    server: &Server,
+    create_wallets: &'static str,
+    create_notifications: &'static str,
+) -> Arc<DatabaseRegistry> {
     server
         .run_sql(server.first_database, "CREATE DATABASE shard_1_0")
         .await;
     let mut transaction_managers = Vec::new();
     for (shard, database) in [(GLOBAL, server.first_database), (MEXICO, "shard_1_0")] {
         server.run_sql(database, create_wallets).await;
+        if shard == GLOBAL {
+            server.run_sql(database, create_notifications).await;
+        }
         let primary = ConnectionProvider::from_config(&server.config(database)).expect("a pool");
         let secondary = ConnectionProvider::from_config(&server.config(database)).expect("a pool");
         transaction_managers.push(TransactionManager::new(shard, primary, Some(secondary)));
@@ -170,26 +189,30 @@ async fn registry(server: &Server, create_wallets: &'static str) -> Arc<Database
     Arc::new(DatabaseRegistry::new(GLOBAL, transaction_managers).expect("a registry"))
 }
 
-async fn run_scenario(server: &Server, create_wallets: &'static str) {
+async fn run_scenario(
+    server: &Server,
+    create_wallets: &'static str,
+    create_notifications: &'static str,
+) {
     let dialect = server.dialect;
-    let registry = registry(server, create_wallets).await;
+    let registry = registry(server, create_wallets, create_notifications).await;
     let wallets = WalletRepository::new(registry.clone());
     let owner = Uuid::new_v4();
     let say = |what: &str| println!("[{dialect:?}] {what}");
 
     // add + get_by_id: one wallet on each shard, outside any transaction.
-    let global = Wallet::open(GLOBAL, owner, "EUR", Decimal::new(10000, 2));
-    let mexico = Wallet::open(MEXICO, owner, "MXN", Decimal::new(5000, 2));
+    let global = open(GLOBAL, owner, "EUR", Decimal::new(10000, 2));
+    let mexico = open(MEXICO, owner, "MXN", Decimal::new(5000, 2));
     wallets.add(None, &global).await.expect("adds");
     wallets.add(None, &mexico).await.expect("adds");
-    assert_eq!(wallets.get_by_id(&mexico.id).await.expect("reads"), mexico);
+    assert_eq!(wallets.get_by_id(mexico.id()).await.expect("reads"), mexico);
     say("add + get_by_id: the wallet reads back equal (UUID, decimal, microsecond times)");
 
     // The id picks the shard: the Mexican wallet is in shard 1/0's database only.
     let by_id = Query::select()
         .column(Asterisk)
         .from(Wallets::Table)
-        .and_where(Expr::col(Wallets::Id).eq(mexico.id.uuid()))
+        .and_where(Expr::col(Wallets::Id).eq(mexico.id().uuid()))
         .to_owned();
     let in_global = wallets
         .db(GLOBAL)
@@ -207,49 +230,50 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
     say("db(shard): the Mexican wallet is in shard 1/0's database and not in 0/0's");
 
     // Optimistic lock: two writers read version 1; the second one loses.
-    let read_once = wallets.get_by_id(&mexico.id).await.unwrap();
+    let read_once = wallets.get_by_id(mexico.id()).await.unwrap();
     let read_twice = read_once.clone();
-    let richer = Wallet {
-        balance: read_once.balance + Decimal::ONE,
-        ..read_once
-    };
+    let richer = read_once
+        .copy()
+        .balance(read_once.balance + Decimal::ONE)
+        .build()
+        .unwrap();
     wallets.update(None, &richer).await.unwrap();
     let stale = wallets.update(None, &read_twice).await;
     assert!(
         matches!(stale, Err(Error::StaleRecord { version: 1, .. })),
         "{stale:?}"
     );
-    let after = wallets.get_by_id(&mexico.id).await.unwrap();
-    assert_eq!((after.version, after.balance), (2, Decimal::new(5100, 2)));
+    let after = wallets.get_by_id(mexico.id()).await.unwrap();
+    assert_eq!((after.version(), after.balance), (2, Decimal::new(5100, 2)));
     say("update: the second writer of version 1 gets StaleRecord; the row is at version 2");
 
     // Transactions: an Err rolls back both writes; an Ok commits both.
     let mexico_tm = registry.transaction_manager(MEXICO).unwrap();
-    let extra = Wallet::open(MEXICO, owner, "MXN", Decimal::ZERO);
+    let extra = open(MEXICO, owner, "MXN", Decimal::ZERO);
     let failed = mexico_tm
         .in_transaction(async |tx| {
             wallets.add(Some(tx), &extra).await?;
-            wallets.mark_all_settled(Some(tx), &[mexico.id]).await?;
+            wallets.mark_all_settled(Some(tx), &[*mexico.id()]).await?;
             Err::<(), _>(Error::Mapping("changed my mind".to_owned()))
         })
         .await;
     assert!(failed.is_err());
-    assert!(!wallets.exists_by_id(&extra.id).await.unwrap());
+    assert!(!wallets.exists_by_id(extra.id()).await.unwrap());
     assert_eq!(
-        wallets.get_by_id(&mexico.id).await.unwrap().state,
+        wallets.get_by_id(mexico.id()).await.unwrap().state(),
         WalletState::Opened
     );
     mexico_tm
         .in_transaction(async |tx| {
             wallets.add(Some(tx), &extra).await?;
-            wallets.mark_all_settled(Some(tx), &[mexico.id]).await?;
+            wallets.mark_all_settled(Some(tx), &[*mexico.id()]).await?;
             Ok(())
         })
         .await
         .unwrap();
-    assert!(wallets.exists_by_id(&extra.id).await.unwrap());
+    assert!(wallets.exists_by_id(extra.id()).await.unwrap());
     assert_eq!(
-        wallets.get_by_id(&mexico.id).await.unwrap().state,
+        wallets.get_by_id(mexico.id()).await.unwrap().state(),
         WalletState::Settled
     );
     say("tx_db_else_db(Some(tx)): an Err rolls back the add and the settle; an Ok commits both");
@@ -258,7 +282,7 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
     let wrong = registry
         .transaction_manager(GLOBAL)
         .unwrap()
-        .in_transaction(async |tx| wallets.mark_all_settled(Some(tx), &[extra.id]).await)
+        .in_transaction(async |tx| wallets.mark_all_settled(Some(tx), &[*extra.id()]).await)
         .await;
     assert!(matches!(wrong, Err(Error::WrongShard { .. })), "{wrong:?}");
     say("tx_db: a transaction on shard 0/0 can't write a wallet on shard 1/0");
@@ -272,30 +296,27 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
     say("dbs / readonly_dbs: counts and lists span both shards");
 
     // Soft delete: a DELETED wallet is gone from every read.
-    let current = wallets.get_by_id(&global.id).await.unwrap();
+    let current = wallets.get_by_id(global.id()).await.unwrap();
     wallets
         .update(
             None,
-            &Wallet {
-                state: WalletState::Deleted,
-                ..current
-            },
+            &current.copy().state(WalletState::Deleted).build().unwrap(),
         )
         .await
         .unwrap();
-    assert!(wallets.find_by_id(&global.id).await.unwrap().is_none());
+    assert!(wallets.find_by_id(global.id()).await.unwrap().is_none());
     assert_eq!(wallets.find_all_by_owner_id(owner).await.unwrap().len(), 2);
     say("soft delete: find_by_id and the owner's list no longer see it");
 
     // Idempotent insert: ON CONFLICT DO NOTHING / INSERT IGNORE.
-    let once = Wallet::open(MEXICO, owner, "MXN", Decimal::ONE);
+    let once = open(MEXICO, owner, "MXN", Decimal::ONE);
     assert!(wallets.add_if_absent(None, &once).await.unwrap());
     assert!(!wallets.add_if_absent(None, &once).await.unwrap());
     say("add_if_absent: the second insert of the same wallet is skipped, not an error");
 
     // Totals per currency: each shard groups and sums; the shards' sums are added up.
-    let euros = Wallet::open(GLOBAL, owner, "EUR", Decimal::new(700, 2));
-    let pesos = Wallet::open(GLOBAL, owner, "MXN", Decimal::new(2000, 2));
+    let euros = open(GLOBAL, owner, "EUR", Decimal::new(700, 2));
+    let pesos = open(GLOBAL, owner, "MXN", Decimal::new(2000, 2));
     wallets.add(None, &euros).await.unwrap();
     wallets.add(None, &pesos).await.unwrap();
     let totals = wallets.total_balance_by_currency().await.unwrap();
@@ -313,18 +334,18 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
         .await
         .unwrap()
         .iter()
-        .map(|wallet| wallet.id)
+        .map(|wallet| *wallet.id())
         .collect();
-    assert_eq!(richest, [mexico.id, pesos.id]);
+    assert_eq!(richest, [*mexico.id(), *pesos.id()]);
     say("richest_wallets: ORDER BY + LIMIT on each shard, merged into one top 2");
 
     // One UPDATE closes the empty wallet and raises its version.
-    let before = wallets.get_by_id(&extra.id).await.unwrap();
+    let before = wallets.get_by_id(extra.id()).await.unwrap();
     assert_eq!(wallets.close_empty_wallets(None, MEXICO).await.unwrap(), 1);
-    let closed = wallets.get_by_id(&extra.id).await.unwrap();
+    let closed = wallets.get_by_id(extra.id()).await.unwrap();
     assert_eq!(
-        (closed.state, closed.version),
-        (WalletState::Closed, before.version + 1)
+        (closed.state(), closed.version()),
+        (WalletState::Closed, before.version() + 1)
     );
     let saved_over = wallets.update(None, &before).await;
     assert!(
@@ -334,6 +355,7 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
     say("close_empty_wallets: one UPDATE closes the empty wallet; an older copy is now stale");
 
     java_methods(&wallets, dialect).await;
+    notifications(&NotificationRepository::new(registry.clone()), dialect).await;
 }
 
 /// Each of Java's repository methods, on wallets of a fresh owner.
@@ -343,19 +365,19 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
     let of_owner = || Cond::all().add(Expr::col(Wallets::OwnerId).eq(owner));
 
     // add: gives back the row as written (RETURNING), or on MySQL the model as given.
-    let one = Wallet::open(MEXICO, owner, "MXN", Decimal::new(100, 0));
+    let one = open(MEXICO, owner, "MXN", Decimal::new(100, 0));
     assert_eq!(wallets.add(None, &one).await.unwrap(), one);
 
     // addAll: one multi-row INSERT; models on two shards are refused.
     let batch: Vec<Wallet> = (1..=3)
-        .map(|n| Wallet::open(MEXICO, owner, "MXN", Decimal::new(n, 0)))
+        .map(|n| open(MEXICO, owner, "MXN", Decimal::new(n, 0)))
         .collect();
     let mut added = wallets.add_all(None, &batch).await.unwrap();
     added.sort_by_key(|wallet| wallet.balance);
     assert_eq!(added, batch);
     let mixed = [
-        Wallet::open(GLOBAL, owner, "EUR", Decimal::ONE),
-        Wallet::open(MEXICO, owner, "MXN", Decimal::ONE),
+        open(GLOBAL, owner, "EUR", Decimal::ONE),
+        open(MEXICO, owner, "MXN", Decimal::ONE),
     ];
     assert!(matches!(
         wallets.add_all(None, &mixed).await,
@@ -364,13 +386,10 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
     say("add / add_all: rows given back as written; two shards in one call refused");
 
     // update: version + 1, other columns as the model has them (updated_date included).
-    let richer = Wallet {
-        balance: Decimal::new(150, 0),
-        ..one.clone()
-    };
+    let richer = one.copy().balance(Decimal::new(150, 0)).build().unwrap();
     let updated = wallets.update(None, &richer).await.unwrap();
     assert_eq!(updated, richer.next_version());
-    assert_eq!(wallets.get_by_id(&one.id).await.unwrap(), updated);
+    assert_eq!(wallets.get_by_id(one.id()).await.unwrap(), updated);
     assert!(matches!(
         wallets.update_no_result(None, &richer).await,
         Err(Error::StaleRecord { version: 1, .. })
@@ -380,9 +399,12 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
     // updateAll: ONE statement for every model; all or nothing on staleness.
     let doubled: Vec<Wallet> = batch
         .iter()
-        .map(|wallet| Wallet {
-            balance: wallet.balance * Decimal::TWO,
-            ..wallet.clone()
+        .map(|wallet| {
+            wallet
+                .copy()
+                .balance(wallet.balance * Decimal::TWO)
+                .build()
+                .unwrap()
         })
         .collect();
     let mut all_updated = wallets.update_all(None, &doubled).await.unwrap();
@@ -420,8 +442,8 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
     // Reads.
     let ids: Vec<_> = batch
         .iter()
-        .map(|wallet| wallet.id)
-        .chain([one.id, batch[0].id])
+        .map(|wallet| *wallet.id())
+        .chain([*one.id(), *batch[0].id()])
         .collect();
     assert_eq!(wallets.find_all_by_ids(&ids).await.unwrap().len(), 4);
     assert_eq!(wallets.count_where(of_owner()).await.unwrap(), 4);
@@ -432,10 +454,40 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
         wallets.find_one_where(of_owner()).await,
         Err(Error::TooManyRows { .. })
     ));
-    let only_one = of_owner().add(Expr::col(Wallets::Id).eq(one.id.uuid()));
+    let only_one = of_owner().add(Expr::col(Wallets::Id).eq(one.id().uuid()));
     assert_eq!(
         wallets.find_one_where(only_one).await.unwrap(),
         Some(updated)
     );
     say("find_all_by_ids / find_all / count / find_one_where / exists_where: as Java's");
+}
+
+/// An entity repository, unsharded: every call goes to the default shard, where alone the
+/// table exists.
+async fn notifications(notifications: &NotificationRepository, dialect: Dialect) {
+    let say = |what: &str| println!("[{dialect:?}] {what}");
+    let wallet_id = Uuid::new_v4();
+    let pending = Notification::create_notification(wallet_id, "DEPOSIT", "a@example.com", "hi")
+        .build()
+        .unwrap();
+    assert_eq!(notifications.add(None, &pending).await.unwrap(), pending);
+    let sent = pending.mark_sent().unwrap();
+    let updated = notifications.update(None, &sent).await.unwrap();
+    assert_eq!(updated.version(), 2);
+    assert_eq!(updated.state(), NotificationState::Sent);
+    assert_eq!(
+        notifications.get_by_id(pending.id()).await.unwrap(),
+        updated
+    );
+    // Scatter reads stay on the default shard: the other shard has no such table.
+    assert_eq!(notifications.count().await.unwrap(), 1);
+    assert_eq!(notifications.find_all().await.unwrap(), [updated]);
+    say("notifications (unsharded entity): add, update, reads only on the default shard");
+}
+
+/// A new wallet, as `Wallet::create_wallet` makes it, at the system clock's time.
+fn open(shard: ShardIdentifier, owner: Uuid, currency: &str, balance: Decimal) -> Wallet {
+    Wallet::create_wallet(shard, owner, currency, balance, SystemClock.instant())
+        .build()
+        .expect("a valid wallet")
 }

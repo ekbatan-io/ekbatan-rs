@@ -25,7 +25,6 @@ impl Table for Wallets {
     const ID: Self = Wallets::Id;
     const VERSION: Self = Wallets::Version;
     const STATE: Self = Wallets::State;
-    const UPDATED_DATE: Self = Wallets::UpdatedDate;
     const COLUMNS: &'static [Self] = &[
         Wallets::Id,
         Wallets::Version,
@@ -64,6 +63,63 @@ impl TableRecord for WalletsRecord {
             (Wallets::Balance, self.balance.into()),
             (Wallets::CreatedDate, self.created_date.into()),
             (Wallets::UpdatedDate, self.updated_date.into()),
+        ]
+    }
+}
+
+/// The `notifications` table.
+#[derive(Iden, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notifications {
+    Table,
+    Id,
+    Version,
+    State,
+    WalletId,
+    Kind,
+    Recipient,
+    Message,
+}
+
+impl Table for Notifications {
+    const TABLE: Self = Notifications::Table;
+    const ID: Self = Notifications::Id;
+    const VERSION: Self = Notifications::Version;
+    const STATE: Self = Notifications::State;
+    const COLUMNS: &'static [Self] = &[
+        Notifications::Id,
+        Notifications::Version,
+        Notifications::State,
+        Notifications::WalletId,
+        Notifications::Kind,
+        Notifications::Recipient,
+        Notifications::Message,
+    ];
+}
+
+/// One `notifications` row.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct NotificationsRecord {
+    pub id: DbUuid,
+    pub version: i64,
+    pub state: String,
+    pub wallet_id: DbUuid,
+    pub kind: String,
+    pub recipient: String,
+    pub message: String,
+}
+
+impl TableRecord for NotificationsRecord {
+    type Table = Notifications;
+
+    fn values(&self) -> Vec<(Notifications, Value)> {
+        vec![
+            (Notifications::Id, self.id.0.into()),
+            (Notifications::Version, self.version.into()),
+            (Notifications::State, self.state.clone().into()),
+            (Notifications::WalletId, self.wallet_id.0.into()),
+            (Notifications::Kind, self.kind.clone().into()),
+            (Notifications::Recipient, self.recipient.clone().into()),
+            (Notifications::Message, self.message.clone().into()),
         ]
     }
 }

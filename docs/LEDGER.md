@@ -9,7 +9,7 @@
 - `Db` (jOOQ's `DSLContext`): runs sea-query statements on a pool or a held connection, writes
   each database's SQL, sends UUIDs to MySQL/MariaDB as text, and `insert_ignoring_duplicates`
   (`ON CONFLICT DO NOTHING` / `INSERT IGNORE`, which sea-query can't write for MySQL).
-- `ModelRepository`: selectors `db`, `dbs`, `readonly_db`, `readonly_dbs`, `tx_db`,
+- `Repository` (was `ModelRepository`): selectors `db`, `dbs`, `readonly_db`, `readonly_dbs`, `tx_db`,
   `tx_db_else_db` (refuses a transaction on another shard), and Java's methods with Java's SQL:
   `add` / `add_all` (one multi-row INSERT; `RETURNING` on PostgreSQL and MariaDB, the model as
   given on MySQL), `update` (version check; `RETURNING` on PostgreSQL, `next_version` on
@@ -22,6 +22,15 @@
 - `UnknownShardPolicy` (`UseDefaultShard`, the default, or `Fail`), as in Java and Python;
   `effective_shard`, also used by `tx_db`.
 - `ShardedId` in Java's bit layout; `DbUuid`.
+- Model layer (item 2): `Model` / `Entity` / `Persistable` / `ModelEvent`, `ModelBase` and
+  `EntityBase` (id, state, version, dates; events on models, left out of equality), their
+  builders (Java's "x cannot be null" errors, dates cut to microseconds, `updated_date` defaults
+  to `created_date`); `Id<M>` and `ShardedId<M>`; `GenericState`. Macros in `ekbatan-macros`:
+  `#[model]` / `#[entity]` (adds `base`, writes `<Name>Builder`, `copy()`, `next_version()`,
+  an optional `validate = path`), `#[model_event(Model)]` (serde, Java's camelCase names).
+  `ShardingStrategy` (`NoSharding`, the default: one shard, `dbs()` = default only;
+  `EmbeddedBits`), and `ShardKey` resolves through it. One `Repository` trait serves models and
+  entities (Java's `ModelRepository` / `EntityRepository` differ only in the persistable).
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -34,7 +43,7 @@ the database), linted, and committed before the next starts.
 | # | Item | Java / Python reference | Status |
 |---|---|---|---|
 | 1 | Clock: `Clock`, `SystemClock`, `VirtualClock` (frozen / skewed / real time); UTC, microseconds | `ekbatan-test-support` `VirtualClock`; py `clock.py`, `time.py` | done (EKB-0005) |
-| 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[model_event]`, `#[repository]` macros on this crate; `EntityRepository`; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | next |
+| 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[entity]`, `#[model_event]` macros; entities; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | done (EKB-0006) |
 | 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | |
 | 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | |
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | |
@@ -51,5 +60,7 @@ the database), linted, and committed before the next starts.
 - MariaDB UPDATE has no `RETURNING`, so `update` there gives back `next_version()` (Java's
   jOOQ path asks for `RETURNING`).
 - `find_all_by_ids` on MariaDB uses `IN (...)` (Java checks only MySQL; jOOQ rewrites the rest).
-- No sharding strategy yet: every id is a `ShardedId`; Java's `NoShardingStrategy` (one shard,
-  `dbs()` = default only) is not ported.
+- No `#[repository]` macro: a repository implements the `Repository` trait by hand
+  (`from_record` / `to_record`), as Java's subclasses do; a macro would save little.
+- `Decimal` in events: serde writes it as a string ("15"), Jackson as a number (15). To settle
+  in item 4 (event serialization byte-compatible with Java).

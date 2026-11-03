@@ -6,10 +6,12 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+ekbatan-macros = { path = "../ekbatan-macros" }
 futures-util.workspace = true
 rust_decimal.workspace = true
 sea-query.workspace = true
 sea-query-sqlx.workspace = true
+serde.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 

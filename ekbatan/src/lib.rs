@@ -8,12 +8,13 @@
 //! - `TransactionManager`: one shard's primary and replica pools, and its transactions.
 //! - `DatabaseRegistry`: every shard's `TransactionManager`.
 //! - `Db`: where statements run and which SQL to write: jOOQ's `DSLContext`.
-//! - `ModelRepository`: Java's `AbstractRepository`, with the database selectors.
+//! - `Repository`: Java's `AbstractRepository`, with the database selectors.
 
 mod clock;
 mod config;
 mod connection;
 mod db;
+mod domain;
 mod error;
 mod registry;
 mod repository;
@@ -25,9 +26,22 @@ pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
 pub use config::DataSourceConfig;
 pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
+pub use domain::{
+    Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase, ModelBuilderBase,
+    ModelEvent, ModelId, Persistable,
+};
 pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};
-pub use repository::{Model, ModelId, ModelRepository, Table, TableRecord};
-pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId};
+pub use repository::{Repository, Table, TableRecord};
+pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId, ShardingStrategy};
 pub use transaction::{Transaction, TransactionManager};
 pub use types::DbUuid;
+
+/// `#[model]`, `#[entity]`, `#[model_event]`: see `ekbatan-macros`.
+pub use ekbatan_macros::{entity, model, model_event};
+
+/// What the macros' output refers to, so an app needs no serde dependency of its own.
+#[doc(hidden)]
+pub mod __private {
+    pub use serde;
+}

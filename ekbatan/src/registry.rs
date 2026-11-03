@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Db, Dbs, Error, ShardIdentifier, ShardKey, TransactionManager};
+use crate::{Db, Dbs, Error, ShardIdentifier, TransactionManager};
 
 /// What to do with a shard this deployment has no database for: Java's `UnknownShardPolicy`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,10 +52,9 @@ impl DatabaseRegistry {
         self.unknown_shard_policy
     }
 
-    /// The shard a key names, or the default shard when it names one with no database and the
-    /// policy says so: Java's `effectiveShard(shard)`.
-    pub fn effective_shard(&self, key: impl ShardKey) -> Result<ShardIdentifier, Error> {
-        let shard = key.shard(self.default_shard);
+    /// `shard`, or the default shard when `shard` has no database and the policy says so: Java's
+    /// `effectiveShard(shard)`.
+    pub fn effective_shard(&self, shard: ShardIdentifier) -> Result<ShardIdentifier, Error> {
         if self.transaction_managers.contains_key(&shard) {
             return Ok(shard);
         }
@@ -67,23 +66,26 @@ impl DatabaseRegistry {
 
     /// The shard's `TransactionManager` (Java's `transactionManager(shard)`), after
     /// `effective_shard`.
-    pub fn transaction_manager(&self, key: impl ShardKey) -> Result<&TransactionManager, Error> {
-        let shard = self.effective_shard(key)?;
+    pub fn transaction_manager(
+        &self,
+        shard: ShardIdentifier,
+    ) -> Result<&TransactionManager, Error> {
+        let shard = self.effective_shard(shard)?;
         Ok(&self.transaction_managers[&shard])
     }
 
     /// Statements on the shard's primary pool: Java's `primary.get(shard)`.
-    pub fn primary(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
+    pub fn primary(&self, shard: ShardIdentifier) -> Result<Db<'_>, Error> {
         Ok(self
-            .transaction_manager(key)?
+            .transaction_manager(shard)?
             .primary_connection_provider()
             .db())
     }
 
     /// Statements on the shard's replica pool (the primary's when it has none).
-    pub fn secondary(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
+    pub fn secondary(&self, shard: ShardIdentifier) -> Result<Db<'_>, Error> {
         Ok(self
-            .transaction_manager(key)?
+            .transaction_manager(shard)?
             .secondary_connection_provider()
             .db())
     }

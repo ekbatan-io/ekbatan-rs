@@ -11,10 +11,13 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `transaction.rs` `TransactionManager` (one shard's pools and transactions) and `Transaction`.
   - `registry.rs` `DatabaseRegistry`: every shard's `TransactionManager`.
   - `db.rs` `Db`: where statements run and which SQL to write (jOOQ's `DSLContext`).
-  - `repository.rs` `ModelRepository`: Java's `AbstractRepository`, with the database selectors.
-  - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout).
+  - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
+  - `repository.rs` `Repository`: Java's `AbstractRepository`, with the database selectors.
+  - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout), `ShardingStrategy`, `ShardKey`.
   - `types.rs` `DbUuid`: UUID columns on every database (Java's `UuidStringConverter`).
   - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
+- `ekbatan-macros/` - `#[model]`, `#[entity]`, `#[model_event]`: what Java's superclasses and
+  `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
 - `ekbatan-test-support/` - what tests of an app use: `VirtualClock` (Java's, case for case).
 - `wallet-example/` - the wallet model, its schema and repository, and the tests on real databases.
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.

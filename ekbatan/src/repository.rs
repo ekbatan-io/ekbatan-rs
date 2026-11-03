@@ -9,30 +9,9 @@ use sea_query::{
 use uuid::Uuid;
 
 use crate::{
-    DatabaseRegistry, Db, Dbs, Dialect, Error, Record, ShardIdentifier, ShardKey, ShardedId,
-    Transaction,
+    DatabaseRegistry, Db, Dbs, Dialect, Error, ModelId, Persistable, Record, ShardIdentifier,
+    ShardKey, ShardingStrategy, Transaction,
 };
-
-/// What the ready-made methods need from a model: Java's `Persistable`.
-pub trait Model: Clone + Send + Sync + 'static {
-    type Id: ModelId;
-
-    fn id(&self) -> &Self::Id;
-    fn version(&self) -> i64;
-    /// The same model at the next version: Java's `nextVersion()`.
-    fn next_version(&self) -> Self;
-}
-
-/// A model's id: a UUID that knows its shard.
-pub trait ModelId: ShardKey + Clone + Send + Sync {
-    fn uuid(&self) -> Uuid;
-}
-
-impl<M> ModelId for ShardedId<M> {
-    fn uuid(&self) -> Uuid {
-        ShardedId::uuid(self)
-    }
-}
 
 /// A table, as schemagen writes it: its name and the columns the ready-made methods use.
 pub trait Table: Iden + PartialEq + Copy + Send + Sync + 'static {
@@ -40,7 +19,6 @@ pub trait Table: Iden + PartialEq + Copy + Send + Sync + 'static {
     const ID: Self;
     const VERSION: Self;
     const STATE: Self;
-    const UPDATED_DATE: Self;
     const COLUMNS: &'static [Self];
 }
 
@@ -51,8 +29,8 @@ pub trait TableRecord: Record + 'static {
     fn values(&self) -> Vec<(Self::Table, Value)>;
 }
 
-type TableOf<R> = <<R as ModelRepository>::Record as TableRecord>::Table;
-type IdOf<R> = <<R as ModelRepository>::Model as Model>::Id;
+type TableOf<R> = <<R as Repository>::Record as TableRecord>::Table;
+type IdOf<R> = <<R as Repository>::Persistable as Persistable>::Id;
 
 /// `state <> 'DELETED'`: Java's private `notDeleted()`. Only the ready-made methods use it;
 /// custom queries write their own condition when they want one.
@@ -207,44 +185,77 @@ fn update_all_sql<R: TableRecord>(dialect: Dialect, records: &[R]) -> (String, V
     (sql, Values(values))
 }
 
-/// Java's `AbstractRepository`. An implementation says where the databases are and how a row
-/// becomes a model and back (`from_record` / `to_record`, as in Java); the database selectors
-/// and the ready-made methods below work from that, with Java's SQL.
-pub trait ModelRepository: Send + Sync {
-    type Model: Model;
+/// Java's `AbstractRepository` (and its `ModelRepository` / `EntityRepository`, which differ
+/// only in what they store). An implementation says where the databases are, how a row becomes
+/// a model or entity and back (`from_record` / `to_record`, as in Java) and, if it shards, its
+/// `sharding_strategy`; the selectors and the ready-made methods below work from that, with
+/// Java's SQL.
+pub trait Repository: Send + Sync {
+    type Persistable: Persistable;
     type Record: TableRecord;
 
     fn registry(&self) -> &DatabaseRegistry;
-    fn from_record(record: Self::Record) -> Result<Self::Model, Error>;
-    fn to_record(model: &Self::Model) -> Self::Record;
+    fn from_record(record: Self::Record) -> Result<Self::Persistable, Error>;
+    fn to_record(persistable: &Self::Persistable) -> Self::Record;
+
+    /// How ids name shards: `NoSharding` unless overridden, as Java's repositories default to
+    /// `NoShardingStrategy`.
+    fn sharding_strategy(&self) -> ShardingStrategy {
+        ShardingStrategy::NoSharding
+    }
+
+    /// The shard a key names through this repository's strategy, or the default shard; then the
+    /// registry's unknown-shard policy. Java's `effectiveShard(...)`.
+    fn effective_shard(&self, key: impl ShardKey) -> Result<ShardIdentifier, Error> {
+        let registry = self.registry();
+        let shard = key
+            .resolve(self.sharding_strategy())
+            .unwrap_or_else(|| registry.default_shard());
+        registry.effective_shard(shard)
+    }
 
     // ---- The database selectors. Each takes a shard key: `DefaultShard`, a `ShardIdentifier`,
     // ---- or an id, which covers Java's overloads.
 
     /// The primary: for writes, and reads that must be current. Java's `db(...)`.
     fn db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
-        self.registry().primary(key)
+        self.registry().primary(self.effective_shard(key)?)
     }
 
-    /// Every shard's primary. Java's `dbs()`.
+    /// Every shard's primary; only the default shard's under `NoSharding`. Java's `dbs()`.
     fn dbs(&self) -> Dbs<'_> {
-        self.registry().primaries()
+        let registry = self.registry();
+        match self.sharding_strategy() {
+            ShardingStrategy::NoSharding => Dbs(registry
+                .primary(registry.default_shard())
+                .into_iter()
+                .collect()),
+            ShardingStrategy::EmbeddedBits => registry.primaries(),
+        }
     }
 
     /// The replica: for reads that may lag. Java's `readonlyDb(...)`.
     fn readonly_db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
-        self.registry().secondary(key)
+        self.registry().secondary(self.effective_shard(key)?)
     }
 
-    /// Every shard's replica. Java's `readonlyDbs()`.
+    /// Every shard's replica; only the default shard's under `NoSharding`. Java's
+    /// `readonlyDbs()`.
     fn readonly_dbs(&self) -> Dbs<'_> {
-        self.registry().secondaries()
+        let registry = self.registry();
+        match self.sharding_strategy() {
+            ShardingStrategy::NoSharding => Dbs(registry
+                .secondary(registry.default_shard())
+                .into_iter()
+                .collect()),
+            ShardingStrategy::EmbeddedBits => registry.secondaries(),
+        }
     }
 
     /// The caller's transaction, refused if it is on another shard than the key. Java's
     /// `txDb(...)`, which returns an empty `Optional` instead.
     fn tx_db<'a>(&'a self, tx: &'a mut Transaction, key: impl ShardKey) -> Result<Db<'a>, Error> {
-        let shard = self.registry().effective_shard(key)?;
+        let shard = self.effective_shard(key)?;
         if tx.shard() != shard {
             return Err(Error::WrongShard {
                 transaction: tx.shard(),
@@ -268,10 +279,13 @@ pub trait ModelRepository: Send + Sync {
 
     /// The one shard all `models` are on: Java's `effectiveShard(Collection)`, which refuses
     /// models on two shards with `CrossShardException`.
-    fn shard_of_all(&self, models: &[Self::Model]) -> Result<ShardIdentifier, Error> {
+    fn shard_of_all(&self, models: &[Self::Persistable]) -> Result<ShardIdentifier, Error> {
+        if self.sharding_strategy() == ShardingStrategy::NoSharding {
+            return Ok(self.registry().default_shard());
+        }
         let mut first = None;
         for model in models {
-            let shard = self.registry().effective_shard(model.id())?;
+            let shard = self.effective_shard(model.id())?;
             match first {
                 None => first = Some(shard),
                 Some(first) if first != shard => {
@@ -293,8 +307,8 @@ pub trait ModelRepository: Send + Sync {
     fn add(
         &self,
         tx: Option<&mut Transaction>,
-        model: &Self::Model,
-    ) -> impl Future<Output = Result<Self::Model, Error>> + Send {
+        model: &Self::Persistable,
+    ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
             let insert = insert_of(&[Self::to_record(model)]);
             let mut db = self.tx_db_else_db(tx, model.id())?;
@@ -318,7 +332,7 @@ pub trait ModelRepository: Send + Sync {
     fn add_no_result(
         &self,
         tx: Option<&mut Transaction>,
-        model: &Self::Model,
+        model: &Self::Persistable,
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             let insert = insert_of(&[Self::to_record(model)]);
@@ -331,8 +345,8 @@ pub trait ModelRepository: Send + Sync {
     fn add_all(
         &self,
         tx: Option<&mut Transaction>,
-        models: &[Self::Model],
-    ) -> impl Future<Output = Result<Vec<Self::Model>, Error>> + Send {
+        models: &[Self::Persistable],
+    ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             match models {
                 [] => return Ok(Vec::new()),
@@ -364,7 +378,7 @@ pub trait ModelRepository: Send + Sync {
     fn add_all_no_result(
         &self,
         tx: Option<&mut Transaction>,
-        models: &[Self::Model],
+        models: &[Self::Persistable],
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             if models.is_empty() {
@@ -386,8 +400,8 @@ pub trait ModelRepository: Send + Sync {
     fn update(
         &self,
         tx: Option<&mut Transaction>,
-        model: &Self::Model,
-    ) -> impl Future<Output = Result<Self::Model, Error>> + Send {
+        model: &Self::Persistable,
+    ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
             let stale = || Error::StaleRecord {
                 table: TableOf::<Self>::TABLE.to_string(),
@@ -413,7 +427,7 @@ pub trait ModelRepository: Send + Sync {
     fn update_no_result(
         &self,
         tx: Option<&mut Transaction>,
-        model: &Self::Model,
+        model: &Self::Persistable,
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             let update = update_of(&Self::to_record(model), model.id().uuid(), model.version());
@@ -438,8 +452,8 @@ pub trait ModelRepository: Send + Sync {
     fn update_all(
         &self,
         tx: Option<&mut Transaction>,
-        models: &[Self::Model],
-    ) -> impl Future<Output = Result<Vec<Self::Model>, Error>> + Send {
+        models: &[Self::Persistable],
+    ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             match models {
                 [] => return Ok(Vec::new()),
@@ -466,7 +480,7 @@ pub trait ModelRepository: Send + Sync {
             if affected < models.len() {
                 return Err(stale(affected));
             }
-            Ok(models.iter().map(Model::next_version).collect())
+            Ok(models.iter().map(Persistable::next_version).collect())
         }
     }
 
@@ -474,7 +488,7 @@ pub trait ModelRepository: Send + Sync {
     fn update_all_no_result(
         &self,
         tx: Option<&mut Transaction>,
-        models: &[Self::Model],
+        models: &[Self::Persistable],
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             match models {
@@ -509,7 +523,7 @@ pub trait ModelRepository: Send + Sync {
     fn find_by_id(
         &self,
         id: &IdOf<Self>,
-    ) -> impl Future<Output = Result<Option<Self::Model>, Error>> + Send {
+    ) -> impl Future<Output = Result<Option<Self::Persistable>, Error>> + Send {
         async move {
             let select = select_from::<TableOf<Self>>()
                 .and_where(Expr::col(TableOf::<Self>::ID).eq(id.uuid()))
@@ -527,7 +541,7 @@ pub trait ModelRepository: Send + Sync {
     fn get_by_id(
         &self,
         id: &IdOf<Self>,
-    ) -> impl Future<Output = Result<Self::Model, Error>> + Send {
+    ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
             self.find_by_id(id).await?.ok_or_else(|| Error::NotFound {
                 table: TableOf::<Self>::TABLE.to_string(),
@@ -541,7 +555,7 @@ pub trait ModelRepository: Send + Sync {
     fn find_all_by_ids(
         &self,
         ids: &[IdOf<Self>],
-    ) -> impl Future<Output = Result<Vec<Self::Model>, Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             let mut seen = BTreeSet::new();
             let mut by_shard: Vec<(ShardIdentifier, Vec<Uuid>)> = Vec::new();
@@ -549,7 +563,7 @@ pub trait ModelRepository: Send + Sync {
                 if !seen.insert(id.uuid()) {
                     continue;
                 }
-                let shard = self.registry().effective_shard(id)?;
+                let shard = self.effective_shard(id)?;
                 match by_shard.iter_mut().find(|(known, _)| *known == shard) {
                     Some((_, uuids)) => uuids.push(id.uuid()),
                     None => by_shard.push((shard, vec![id.uuid()])),
@@ -582,7 +596,7 @@ pub trait ModelRepository: Send + Sync {
     }
 
     /// Every row of every shard. Java's `findAll`.
-    fn find_all(&self) -> impl Future<Output = Result<Vec<Self::Model>, Error>> + Send {
+    fn find_all(&self) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             let select = select_from::<TableOf<Self>>()
                 .and_where(not_deleted::<TableOf<Self>>())
@@ -633,7 +647,7 @@ pub trait ModelRepository: Send + Sync {
     fn find_one_where(
         &self,
         condition: Condition,
-    ) -> impl Future<Output = Result<Option<Self::Model>, Error>> + Send {
+    ) -> impl Future<Output = Result<Option<Self::Persistable>, Error>> + Send {
         async move {
             let select = select_from::<TableOf<Self>>()
                 .cond_where(condition)
@@ -658,7 +672,7 @@ pub trait ModelRepository: Send + Sync {
     fn find_all_where(
         &self,
         condition: Condition,
-    ) -> impl Future<Output = Result<Vec<Self::Model>, Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             let select = select_from::<TableOf<Self>>()
                 .cond_where(condition)

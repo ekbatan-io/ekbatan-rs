@@ -23,6 +23,8 @@ pub enum Error {
     UnknownShard(ShardIdentifier),
     /// A row that doesn't make a valid model.
     Mapping(String),
+    /// A value a model or entity can't have: Java's `Validate` failures (`IllegalArgumentException`).
+    Invalid(String),
     /// Models on two shards in one call that must stay on one: Java's `CrossShardException`.
     CrossShard {
         first: ShardIdentifier,
@@ -66,6 +68,7 @@ impl fmt::Display for Error {
             }
             Error::UnknownShard(shard) => write!(f, "no database for shard {shard}"),
             Error::Mapping(message) => write!(f, "{message}"),
+            Error::Invalid(message) => write!(f, "{message}"),
             Error::Config(message) => write!(f, "invalid configuration: {message}"),
             Error::CrossShard { first, second } => {
                 write!(
