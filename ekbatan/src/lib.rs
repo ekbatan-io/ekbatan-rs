@@ -13,12 +13,13 @@
 pub mod action;
 mod clock;
 mod config;
-mod connection;
+pub(crate) mod connection;
 pub(crate) mod db;
 mod domain;
 mod error;
 mod ids_json;
 pub mod json;
+pub mod migration;
 mod registry;
 mod repository;
 mod shard;
@@ -41,7 +42,7 @@ pub use transaction::{Transaction, TransactionManager};
 pub use types::DbUuid;
 
 /// `#[model]`, `#[entity]`, `#[model_event]`: see `ekbatan-macros`.
-pub use ekbatan_macros::{entity, model, model_event};
+pub use ekbatan_macros::{embed_migrations, entity, model, model_event};
 
 /// What the macros' output refers to, so an app needs no serde dependency of its own.
 #[doc(hidden)]

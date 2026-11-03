@@ -44,6 +44,11 @@ pub enum Error {
     Unexpected(String),
     /// A setting that can't work, such as a pool of zero connections.
     Config(String),
+    /// A migration failed on one target (`name (group:member)`).
+    Migration {
+        target: String,
+        source: sqlx::migrate::MigrateError,
+    },
     /// A value that can't be written as JSON, or JSON that can't be read back.
     Json(serde_json::Error),
     /// An action's own failure: what a Java action throws. Carries the app's error, which
@@ -115,6 +120,9 @@ impl fmt::Display for Error {
             Error::TooManyRows { table } => write!(f, "more than one row of {table} matched"),
             Error::Unexpected(message) => write!(f, "{message}"),
             Error::Json(error) => write!(f, "JSON error: {error}"),
+            Error::Migration { target, source } => {
+                write!(f, "migrating {target} failed: {source}")
+            }
             Error::Action(error) => write!(f, "{error}"),
         }
     }
@@ -125,6 +133,7 @@ impl std::error::Error for Error {
         match self {
             Error::Database(error) => Some(error),
             Error::Json(error) => Some(error),
+            Error::Migration { source, .. } => Some(source),
             Error::Action(error) => Some(&**error),
             _ => None,
         }

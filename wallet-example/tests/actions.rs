@@ -91,8 +91,8 @@ fn app(registry: Arc<DatabaseRegistry>) -> App {
 }
 
 async fn run(dialect: Dialect) {
-    let server = start(dialect).await;
-    let app = app(server.registry().await);
+    let cluster = start(dialect).await;
+    let app = app(cluster.registry().await);
     let say = |what: &str| println!("[{dialect:?}] {what}");
     let owner = Uuid::new_v4();
 
@@ -269,14 +269,8 @@ async fn run(dialect: Dialect) {
     })
     .await;
     assert_eq!(app.wallets.find_all_by_ids(&opened).await.unwrap().len(), 2);
-    if dialect == Dialect::Postgres {
-        // On MySQL/MariaDB the test's two shards share one eventlog database.
-        assert_eq!((global.len(), mexico.len()), (1, 1));
-        assert_eq!(global[0].action_id, mexico[0].action_id);
-    } else {
-        assert_eq!(global.len(), 2);
-        assert_eq!(global[0].action_id, global[1].action_id);
-    }
+    assert_eq!((global.len(), mexico.len()), (1, 1));
+    assert_eq!(global[0].action_id, mexico[0].action_id);
     say("cross-shard: refused by default; allowed, both shards commit under one action id");
 
     // A stale record is retried once by default, from a new plan; with no retry it fails.

@@ -68,6 +68,10 @@ impl ConnectionProvider {
         })
     }
 
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.pool
+    }
+
     pub fn dialect(&self) -> Dialect {
         self.dialect
     }

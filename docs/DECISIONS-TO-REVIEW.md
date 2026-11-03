@@ -37,3 +37,22 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
 8. **Decimal as a JSON number** needs rust_decimal's `serde-float` + `serde-arbitrary-precision`
    (exact, not a float), which turns on serde_json's `arbitrary_precision` for the whole build.
 9. **Logging uses `tracing`** (already in the build through sqlx), at Java's levels and words.
+
+## Item 5: migrations (2026-11-03)
+
+1. **sqlx's migrator does the work** (agreed with the user), behind Java's `FlywayMigrator`
+   shape: `Migrator::builder().with_targets(..).locations(..).migrate()`, one target per shard,
+   stop at the first failure and log which targets were already migrated.
+2. **Java's file names** (`V0001__eventlog.sql`), so Java's migration files copy over as they
+   are. Only whole-number versions (sqlx keeps one integer): `V1_1__` / `V1.1__` are refused,
+   as are repeatable (`R__`) and undo (`U`) files.
+3. **History table is sqlx's `_sqlx_migrations`**, not Flyway's `flyway_schema_history`: a
+   database migrated by Java's Flyway is not seen as migrated here, and the other way round.
+4. **Outside a transaction:** sqlx's first-line marker `-- no-transaction`, and Flyway's
+   `V0005__x.sql.conf` with `executeInTransaction=false`; both work.
+5. **`embed_migrations!("migrations/postgres")`** builds the files into the binary (with their
+   `.sql.conf`), so an app ships without a migrations folder. The default location, as Java's
+   `classpath:db/migration`, is the `migrations` folder.
+6. **Tests now run one server per shard for MySQL/MariaDB**: their `eventlog` is a database per
+   server, so two shards in one server would both try to create `eventlog.events` (Java's MySQL
+   examples are unsharded). PostgreSQL keeps one server with a database per shard.

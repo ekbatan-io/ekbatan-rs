@@ -327,3 +327,42 @@ pub fn model_event(args: TokenStream, item: TokenStream) -> TokenStream {
     }
     .into()
 }
+
+/// `embed_migrations!("migrations/postgres")`: the folder's migration files (`*.sql`, and
+/// Flyway's `*.sql.conf`) built into the binary, as a `MigrationLocation`. The path is relative
+/// to the crate's `Cargo.toml`. A file added or changed is picked up on the next build.
+#[proc_macro]
+pub fn embed_migrations(input: TokenStream) -> TokenStream {
+    let path = parse_macro_input!(input as syn::LitStr);
+    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
+    let dir = std::path::Path::new(&root).join(path.value());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return syn::Error::new_spanned(
+                &path,
+                format!("can't read the migration folder {}: {error}", dir.display()),
+            )
+            .into_compile_error()
+            .into();
+        }
+    };
+    let mut files: Vec<(String, String)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter_map(|file| {
+            let name = file.file_name()?.to_str()?.to_owned();
+            (name.ends_with(".sql") || name.ends_with(".sql.conf"))
+                .then(|| (name, file.display().to_string()))
+        })
+        .collect();
+    files.sort();
+    let names = files.iter().map(|(name, _)| name);
+    let paths = files.iter().map(|(_, path)| path);
+    quote! {
+        ::ekbatan::migration::MigrationLocation::Embedded(&[
+            #((#names, ::core::include_str!(#paths)),)*
+        ])
+    }
+    .into()
+}

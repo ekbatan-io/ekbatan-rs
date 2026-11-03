@@ -1,5 +1,5 @@
-//! The wallet repository on real databases: PostgreSQL, MySQL and MariaDB, two shards each
-//! (two databases in one server). The same scenario runs on all three.
+//! The wallet repository on real databases: PostgreSQL, MySQL and MariaDB, two shards each.
+//! The same scenario runs on all three.
 
 use ekbatan::{
     Clock, Dialect, Entity, Error, Model, Persistable, Repository, ShardIdentifier, SystemClock,
@@ -46,9 +46,9 @@ fn one_statement_two_sql_flavours() {
     println!("MySQL / MariaDB: {}", update.to_string(MysqlQueryBuilder));
 }
 
-async fn run_scenario(server: &common::Server) {
-    let dialect = server.dialect;
-    let registry = server.registry().await;
+async fn run_scenario(cluster: &common::Cluster) {
+    let dialect = cluster.dialect;
+    let registry = cluster.registry().await;
     let wallets = WalletRepository::new(registry.clone());
     let owner = Uuid::new_v4();
     let say = |what: &str| println!("[{dialect:?}] {what}");
@@ -208,7 +208,7 @@ async fn run_scenario(server: &common::Server) {
     say("close_empty_wallets: one UPDATE closes the empty wallet; an older copy is now stale");
 
     java_methods(&wallets, dialect).await;
-    notifications(&NotificationRepository::new(registry.clone()), dialect).await;
+    notifications(&NotificationRepository::new(registry.clone()), cluster).await;
 }
 
 /// Each of Java's repository methods, on wallets of a fresh owner.
@@ -315,9 +315,21 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
     say("find_all_by_ids / find_all / count / find_one_where / exists_where: as Java's");
 }
 
-/// An entity repository, unsharded: every call goes to the default shard, where alone the
-/// table exists.
-async fn notifications(notifications: &NotificationRepository, dialect: Dialect) {
+/// An entity repository, unsharded: every call goes to the default shard.
+async fn notifications(notifications: &NotificationRepository, cluster: &common::Cluster) {
+    let dialect = cluster.dialect;
+    // A row on the other shard, put there behind ekbatan's back: an unsharded repository must
+    // never see it.
+    cluster
+        .run_sql(
+            MEXICO,
+            &format!(
+                "INSERT INTO notifications VALUES ('{}', 1, 'PENDING', '{}', 'STRAY', 'r', 'm')",
+                Uuid::new_v4(),
+                Uuid::new_v4()
+            ),
+        )
+        .await;
     let say = |what: &str| println!("[{dialect:?}] {what}");
     let wallet_id = Uuid::new_v4();
     let pending = Notification::create_notification(wallet_id, "DEPOSIT", "a@example.com", "hi")
@@ -332,7 +344,7 @@ async fn notifications(notifications: &NotificationRepository, dialect: Dialect)
         notifications.get_by_id(pending.id()).await.unwrap(),
         updated
     );
-    // Scatter reads stay on the default shard: the other shard has no such table.
+    // Reads stay on the default shard: the stray row on the other shard isn't counted.
     assert_eq!(notifications.count().await.unwrap(), 1);
     assert_eq!(notifications.find_all().await.unwrap(), [updated]);
     say("notifications (unsharded entity): add, update, reads only on the default shard");

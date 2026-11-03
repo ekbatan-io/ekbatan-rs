@@ -13,6 +13,7 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `db.rs` `Db`: where statements run and which SQL to write (jOOQ's `DSLContext`).
   - `action/` `Action`, `ActionPlan`, `ActionExecutor`, the registries, `ExecutionConfiguration`,
     and the event log (`EventPersister`, `eventlog.events`).
+  - `migration.rs` `Migrator`: Java's `FlywayMigrator` on sqlx's migrator (Flyway file names).
   - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
   - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
   - `repository.rs` `Repository`: Java's `AbstractRepository`, with the database selectors.
@@ -22,7 +23,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
 - `ekbatan-macros/` - `#[model]`, `#[entity]`, `#[model_event]`: what Java's superclasses and
   `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
 - `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionSpec`, `ActionAssert`.
-- `wallet-example/` - the wallet model, its schema and repository, and the tests on real databases.
+- `wallet-example/` - the wallet model, schema, repositories, actions, migrations
+  (`migrations/<database>`, Java's files), and the tests on real databases.
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.
 - `docs/LEDGER.md` - what is done, what is next, and decisions taken.
 - `docs/DECISIONS-TO-REVIEW.md` - judgement calls waiting for the user.
