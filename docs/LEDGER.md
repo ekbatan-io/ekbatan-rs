@@ -25,17 +25,26 @@
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
-## Next
+## Plan
 
-1. Model layer: bring the `#[model]` / `#[model_event]` / `#[repository]` macros from the
-   earlier sketch onto this crate's `Model` and `ModelRepository` (the sketch's macros targeted
-   a stand-in, not this code).
-2. Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan + events in one
-   transaction, retries on `StaleRecord`, single-shard check).
-3. Event log tables and persister, compatible with Java's.
-4. Schemagen: generate `schema.rs` from a test database with the migrations applied.
-5. Keyed locks on a held `Connection`, with their own pool.
-6. Pool settings from config files; tracing.
+Java (`../ekbatan`) is the reference; Python (`../ekbatan-py`) shows how a port settled each
+question. One item at a time; each is tested (on PostgreSQL, MySQL and MariaDB when it touches
+the database), linted, and committed before the next starts.
+
+| # | Item | Java / Python reference | Status |
+|---|---|---|---|
+| 1 | Clock: `Clock`, `SystemClock`, `VirtualClock` (frozen / skewed / real time); UTC, microseconds | `ekbatan-test-support` `VirtualClock`; py `clock.py`, `time.py` | in progress |
+| 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[model_event]`, `#[repository]` macros on this crate; `EntityRepository`; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | |
+| 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | |
+| 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | |
+| 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | |
+| 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | |
+| 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | |
+| 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | |
+| 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | |
+| 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | |
+| 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | |
+| 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | |
 
 ## Differences from Java to keep in mind
 
