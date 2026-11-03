@@ -1,0 +1,13 @@
+[package]
+name = "ekbatan-schemagen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ekbatan = { path = "../ekbatan" }
+heck = "0.5.0"
+regex = "1.13.1"
+sqlx.workspace = true
+testcontainers-modules.workspace = true
+tokio.workspace = true

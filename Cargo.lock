@@ -710,6 +710,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekbatan-schemagen"
+version = "0.0.0"
+dependencies = [
+ "ekbatan",
+ "heck 0.5.0",
+ "regex",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
+]
+
+[[package]]
 name = "ekbatan-test-support"
 version = "0.0.0"
 dependencies = [
@@ -3070,6 +3082,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "ekbatan",
+ "ekbatan-schemagen",
  "ekbatan-test-support",
  "futures-util",
  "rust_decimal",

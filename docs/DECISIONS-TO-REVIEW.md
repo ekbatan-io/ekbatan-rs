@@ -56,3 +56,27 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
 6. **Tests now run one server per shard for MySQL/MariaDB**: their `eventlog` is a database per
    server, so two shards in one server would both try to create `eventlog.events` (Java's MySQL
    examples are unsharded). PostgreSQL keeps one server with a database per shard.
+
+## Item 6: code generation (2026-11-03)
+
+1. **Runs in the app's `build.rs`** (`ekbatan-schemagen`), as Java's Gradle build runs jOOQ's
+   codegen: a Testcontainers database, ekbatan's `Migrator` into it, `information_schema`
+   read, `$OUT_DIR/schema.rs` written, pulled in with `ekbatan::include_schema!()`. Not
+   committed; regenerated when a migration folder changes (cargo `rerun-if-changed`), so
+   **building the example needs Docker**, as Java's does. An IDE that runs build scripts
+   (rust-analyzer) will start a container when the migrations change.
+2. **Type rules follow Java's builds**: a MySQL/MariaDB `CHAR(36)` is a UUID (`DbUuid`) only on
+   `id` and `*_id` columns (Java's forced type); MariaDB's `UUID` and PostgreSQL's `uuid` are
+   always. Timestamps stay `NaiveDateTime` in the record (Java's records use `Instant`); the
+   repository converts, as before. Project rules: `ForcedType` (regex on `table.column` and on
+   the database type, both matched whole), as jOOQ's.
+3. **JSON columns are refused for now** (no Rust type mapped; a `ForcedType` can name one).
+   Java maps them to a Jackson tree.
+4. **Left out**: `_sqlx_migrations`, `scheduled_tasks`, `flyway_schema_history`, and anything
+   outside the default schema (so `eventlog.*`). `Table` / `TableRecord` are written only for
+   tables with `id`, `version` and `state`; others get the column enum and the row struct.
+5. **Proof**: the example's migrations give byte-identical modules from PostgreSQL, MySQL and
+   MariaDB (`ekbatan-schemagen/tests/generate.rs`), equal to the schema that was hand-written
+   before. The example generates from PostgreSQL.
+6. The schemagen test starts the three databases one after another: started together on one
+   runtime, MySQL's container timed out twice (alone it is ready in about 5s).

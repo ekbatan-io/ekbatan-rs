@@ -44,6 +44,9 @@
 - Migrations (item 5): `migration::Migrator` (Java's `FlywayMigrator`) on sqlx's migrator:
   Flyway file names, per-shard targets, no-transaction files, `embed_migrations!`. Example:
   Java's migration files per database; tests migrate with it.
+- Code generation (item 6): `ekbatan-schemagen` from `build.rs` (Docker, migrations, reflect,
+  write `$OUT_DIR/schema.rs`), `ekbatan::include_schema!()`, `ForcedType`. The example's schema
+  is generated now.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -60,7 +63,7 @@ the database), linted, and committed before the next starts.
 | 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | done (EKB-0007) |
 | 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | done (EKB-0007) |
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | done (EKB-0008) |
-| 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | |
+| 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | done (EKB-0009) |
 | 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | |
 | 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | |
 | 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | |

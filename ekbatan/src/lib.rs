@@ -49,3 +49,12 @@ pub use ekbatan_macros::{embed_migrations, entity, model, model_event};
 pub mod __private {
     pub use serde;
 }
+
+/// The module `ekbatan-schemagen` wrote in `build.rs` (`$OUT_DIR/schema.rs`): put it in the
+/// app's `schema.rs`.
+#[macro_export]
+macro_rules! include_schema {
+    () => {
+        include!(concat!(env!("OUT_DIR"), "/schema.rs"));
+    };
+}

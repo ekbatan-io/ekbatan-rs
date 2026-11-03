@@ -19,3 +19,7 @@ futures-util.workspace = true
 serde_json = { workspace = true }
 testcontainers-modules.workspace = true
 tokio.workspace = true
+
+[build-dependencies]
+ekbatan = { path = "../ekbatan" }
+ekbatan-schemagen = { path = "../ekbatan-schemagen" }

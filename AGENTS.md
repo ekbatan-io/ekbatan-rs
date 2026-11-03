@@ -22,6 +22,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
 - `ekbatan-macros/` - `#[model]`, `#[entity]`, `#[model_event]`: what Java's superclasses and
   `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
+- `ekbatan-schemagen/` - generates the app's `schema.rs` in `build.rs` from a Docker database
+  with the migrations applied (Java's jOOQ codegen). Building `wallet-example` needs Docker.
 - `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionSpec`, `ActionAssert`.
 - `wallet-example/` - the wallet model, schema, repositories, actions, migrations
   (`migrations/<database>`, Java's files), and the tests on real databases.
