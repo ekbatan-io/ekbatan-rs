@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::{Db, Dbs, Error, ShardIdentifier, TransactionManager};
+use crate::{
+    ConnectionProvider, Db, Dbs, Error, ShardIdentifier, ShardingConfig, TransactionManager,
+};
 
 /// What to do with a shard this deployment has no database for: Java's `UnknownShardPolicy`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,6 +38,26 @@ impl DatabaseRegistry {
             default_shard,
             unknown_shard_policy: UnknownShardPolicy::default(),
         })
+    }
+
+    /// Every shard of the config: a pool for its `primaryConfig`, and one for its
+    /// `secondaryConfig` when it has one (else replica reads use the primary), as Java's
+    /// `DatabaseRegistry.fromConfig`. Pools open no connection until first used.
+    pub fn from_sharding_config(config: &ShardingConfig) -> Result<Self, Error> {
+        config.validate()?;
+        let mut transaction_managers = Vec::new();
+        for (shard, _, member) in config.shards() {
+            let primary = ConnectionProvider::from_config(member.primary_config())?;
+            let secondary = member
+                .secondary_config()
+                .map(ConnectionProvider::from_config)
+                .transpose()?;
+            transaction_managers.push(TransactionManager::new(shard, primary, secondary));
+        }
+        Ok(
+            DatabaseRegistry::new(config.default_shard, transaction_managers)?
+                .with_unknown_shard_policy(config.unknown_shard_policy),
+        )
     }
 
     /// Java's `withUnknownShardPolicy(policy)`.

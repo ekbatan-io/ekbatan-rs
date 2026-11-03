@@ -23,11 +23,12 @@ pub mod migration;
 mod registry;
 mod repository;
 mod shard;
+mod sharding_config;
 mod transaction;
 mod types;
 
 pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
-pub use config::DataSourceConfig;
+pub use config::{DataSourceConfig, MYSQL_PROPERTIES, POSTGRES_PROPERTIES};
 pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
 pub use domain::{
@@ -38,6 +39,9 @@ pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};
 pub use repository::{Repository, Table, TableRecord};
 pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId, ShardingStrategy};
+pub use sharding_config::{
+    EkbatanConfig, ShardGroupConfig, ShardMemberConfig, ShardingConfig, canonical_key,
+};
 pub use transaction::{Transaction, TransactionManager};
 pub use types::DbUuid;
 

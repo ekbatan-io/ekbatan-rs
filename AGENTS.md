@@ -6,7 +6,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
 ## Layout
 
 - `ekbatan/` - the framework crate.
-  - `config.rs` `DataSourceConfig`: how to reach one database, and its pool sizes.
+  - `config.rs` `DataSourceConfig`: how to reach one database, its pool sizes, driver settings.
+  - `sharding_config.rs` `ShardingConfig`, `EkbatanConfig`: Java's `ekbatan:` config section.
   - `connection.rs` `ConnectionProvider` (one database's pool) and `Connection` (one held connection).
   - `transaction.rs` `TransactionManager` (one shard's pools and transactions) and `Transaction`.
   - `registry.rs` `DatabaseRegistry`: every shard's `TransactionManager`.

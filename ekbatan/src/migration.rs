@@ -93,6 +93,25 @@ impl Migrator {
         Ok(results.remove(0))
     }
 
+    /// Each shard's primary database, named `<group name>/<member name>` (or `member-<n>`):
+    /// Java's `FlywayMigrator.targets(shardingConfig)`.
+    pub fn targets(config: &crate::ShardingConfig) -> Vec<MigrationTarget> {
+        config
+            .shards()
+            .map(|(shard, group, member)| {
+                let member_name = member
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("member-{}", member.member));
+                Migrator::named_target(
+                    shard,
+                    &format!("{}/{member_name}", group.name),
+                    member.primary_config().clone(),
+                )
+            })
+            .collect()
+    }
+
     /// The default shard's database, named `default`.
     pub fn default_target(data_source_config: DataSourceConfig) -> MigrationTarget {
         Migrator::named_target(ShardIdentifier::DEFAULT, "default", data_source_config)
@@ -131,6 +150,11 @@ impl MigratorBuilder {
     pub fn with_target(mut self, target: MigrationTarget) -> Self {
         self.targets.push(target);
         self
+    }
+
+    /// Every shard of the config: Java's `withShardingConfig`.
+    pub fn with_sharding_config(self, config: &crate::ShardingConfig) -> Self {
+        self.with_targets(Migrator::targets(config))
     }
 
     pub fn with_targets(mut self, targets: impl IntoIterator<Item = MigrationTarget>) -> Self {

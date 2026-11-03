@@ -47,6 +47,10 @@
 - Code generation (item 6): `ekbatan-schemagen` from `build.rs` (Docker, migrations, reflect,
   write `$OUT_DIR/schema.rs`), `ekbatan::include_schema!()`, `ForcedType`. The example's schema
   is generated now.
+- Configs (item 7): `ShardingConfig` / `ShardGroupConfig` / `ShardMemberConfig`,
+  `EkbatanConfig` (Java's `ekbatan:` section from a JSON file or a parsed tree, `${VAR}`),
+  `DataSourceConfig::from_jdbc_url`, `dataSourceProperties` (sqlx's names), Java's checks,
+  `DatabaseRegistry::from_sharding_config`, `Migrator::targets`. Open: YAML/TOML reader choice.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -64,7 +68,7 @@ the database), linted, and committed before the next starts.
 | 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | done (EKB-0007) |
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | done (EKB-0008) |
 | 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | done (EKB-0009) |
-| 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | |
+| 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | done (EKB-0011); file format open |
 | 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | |
 | 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | |
 | 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | |

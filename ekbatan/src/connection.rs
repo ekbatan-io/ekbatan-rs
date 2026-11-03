@@ -1,9 +1,8 @@
 use std::fmt;
-use std::str::FromStr;
 
-use sqlx::mysql::{MySql, MySqlConnectOptions, MySqlPool};
+use sqlx::mysql::{MySql, MySqlPool};
 use sqlx::pool::{PoolConnection, PoolOptions};
-use sqlx::postgres::{PgConnectOptions, PgPool, Postgres};
+use sqlx::postgres::{PgPool, Postgres};
 
 use crate::{DataSourceConfig, Db, Dialect, Error};
 
@@ -40,26 +39,13 @@ impl ConnectionProvider {
                 config.maximum_pool_size
             )));
         }
+        config.validate()?;
         let pool = match config.dialect {
             Dialect::Postgres => {
-                let mut options = PgConnectOptions::from_str(&config.url)?;
-                if let Some(username) = &config.username {
-                    options = options.username(username);
-                }
-                if let Some(password) = &config.password {
-                    options = options.password(password);
-                }
-                Pool::Postgres(pool_options(config).connect_lazy_with(options))
+                Pool::Postgres(pool_options(config).connect_lazy_with(config.postgres_options()?))
             }
             Dialect::MySql | Dialect::MariaDb => {
-                let mut options = MySqlConnectOptions::from_str(&config.url)?;
-                if let Some(username) = &config.username {
-                    options = options.username(username);
-                }
-                if let Some(password) = &config.password {
-                    options = options.password(password);
-                }
-                Pool::MySql(pool_options(config).connect_lazy_with(options))
+                Pool::MySql(pool_options(config).connect_lazy_with(config.mysql_options()?))
             }
         };
         Ok(ConnectionProvider {

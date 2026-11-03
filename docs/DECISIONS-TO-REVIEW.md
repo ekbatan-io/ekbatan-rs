@@ -90,3 +90,28 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    module); the module's methods take `&self`, so they can't change them either.
 3. Proven by `compile_fail` doc tests on `Wallet` (assigning a field, reaching `base`) next to
    a positive one that differs only in that line.
+
+## Item 7: configs (2026-11-03)
+
+1. **Java's layout and keys** for the `ekbatan:` section (`namespace`, `sharding` with groups,
+   members and named `configs`, `jdbcUrl`, `maximumPoolSize`, ...), kebab-case, snake_case or
+   camelCase, with Spring's `${VAR}` / `${VAR:default}` / `$${`. Java's sharded example config
+   reads as is (`ekbatan/tests/config.rs`).
+2. **Which file formats: open, for the user.** No YAML or TOML reader is in the build, and
+   picking one is a new dependency. Today: a JSON file (`EkbatanConfig::load_json`), or any
+   format the app parses into a `serde_json::Value` (`EkbatanConfig::from_tree`). Java's files are
+   YAML; candidates: `serde_yaml` is archived; `serde_yaml_ng`, `serde_norway` and `yaml-rust2`
+   are maintained forks/successors; `toml` is the standard TOML reader.
+3. **`jdbcUrl` stays Java's** (`jdbc:postgresql://`, `jdbc:mysql://`, `jdbc:mariadb://`; sqlx's
+   `postgres://` / `mysql://` too); the dialect comes from it, its query parameters become
+   `dataSourceProperties`, and a login in it is refused, as Java's `JdbcUrlCredentials`.
+4. **`dataSourceProperties` are sqlx's names**, not the JDBC drivers': only names sqlx reads
+   are accepted (`POSTGRES_PROPERTIES`, `MYSQL_PROPERTIES`), anything else refused by name.
+   sqlx's PostgreSQL driver logs the value of a URL parameter it doesn't know, and Java treats
+   every value as a secret. So Java's `ApplicationName` must be written `application_name`.
+5. **Accepted and unused**: `driverClassName` (sqlx picks the driver from the URL) and
+   `leakDetectionThreshold` (checked as Java checks it; sqlx has no leak detection), so Java's
+   config files load unchanged.
+6. **Checks added beyond Java's**: the default shard must be a configured one; a group or a
+   member twice is refused. `DataSourceConfig::validate` now runs when a pool is built.
+7. `jobs` and `local-event-handler` are kept as read; items 8 and 9 read them.
