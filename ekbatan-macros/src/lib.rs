@@ -124,6 +124,17 @@ fn expand_persistable(
     let doc = format!("Builds a [`{name}`]: Java's `@AutoBuilder` builder. Written by `{what}`.");
     let validation = validate.map(|path| quote!(#path(&built)?;));
     let is_model = kind == Kind::Model;
+    let model_name = name.to_string();
+    let emitted_events = (kind == Kind::Model).then(|| {
+        quote! {
+            fn emitted_events(&self) -> ::std::vec::Vec<&dyn ::ekbatan::AnyModelEvent> {
+                ::ekbatan::Model::events(self)
+                    .iter()
+                    .map(|event| &**event as &dyn ::ekbatan::AnyModelEvent)
+                    .collect()
+            }
+        }
+    });
     let model_setters = (kind == Kind::Model).then(|| {
         quote! {
             pub fn created_date(mut self, created_date: ::ekbatan::Instant) -> Self {
@@ -177,6 +188,12 @@ fn expand_persistable(
             fn is_model() -> bool {
                 #is_model
             }
+
+            fn model_name() -> &'static str {
+                #model_name
+            }
+
+            #emitted_events
         }
 
         impl #trait_name for #name {
@@ -295,6 +312,16 @@ pub fn model_event(args: TokenStream, item: TokenStream) -> TokenStream {
     });
     quote! {
         #input
+
+        impl ::ekbatan::AnyModelEvent for #name {
+            fn to_json(&self) -> ::core::result::Result<::std::string::String, ::ekbatan::Error> {
+                ::ekbatan::json::to_string(self)
+            }
+
+            fn as_any(&self) -> &dyn ::core::any::Any {
+                self
+            }
+        }
 
         impl ::ekbatan::ModelEvent<#model> for #name {}
     }

@@ -26,6 +26,13 @@ pub trait Persistable: Clone + Send + Sync + 'static {
     fn next_version(&self) -> Self;
     /// `true` for a model, `false` for an entity: Java's `isModel()`.
     fn is_model() -> bool;
+    /// The type's simple name, as Java's `getSimpleName()`: the event log's `model_type`.
+    fn model_name() -> &'static str;
+    /// The events this version carries, whatever their type; empty for an entity. The action
+    /// executor writes them to the event log.
+    fn emitted_events(&self) -> Vec<&dyn AnyModelEvent> {
+        Vec::new()
+    }
 }
 
 /// An id: a UUID that may know its shard. Java's `ModelId`.
@@ -84,13 +91,29 @@ pub trait Entity: Persistable {
 }
 
 /// An event a model emits: Java's `ModelEvent`. `#[model_event(Model)]` implements it, and
-/// derives serde's `Serialize` / `Deserialize` with Java's camelCase field names. The event
-/// log stores the model's id and name with it, so an event doesn't repeat them.
-pub trait ModelEvent<M>: fmt::Debug + Send + Sync + 'static {
+/// derives serde's `Serialize` / `Deserialize` with Java's camelCase field names.
+///
+/// Java's event holds `modelId` and `modelName` itself; here the event log takes them from the
+/// model the event is attached to, and writes them first in the payload as Java's JSON has them.
+pub trait ModelEvent<M>: AnyModelEvent {}
+
+/// What every event can do whatever its model: name its type, write its JSON, be downcast.
+/// `#[model_event]` implements it.
+pub trait AnyModelEvent: fmt::Debug + Send + Sync + 'static {
     /// The event's type name, as Java uses the simple class name: `WalletCreatedEvent`.
     fn event_type(&self) -> &'static str {
         short_name(std::any::type_name::<Self>())
     }
+
+    /// The full type path, to tell apart two event types with one simple name.
+    fn type_path(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    /// The event's own fields as JSON text, in declaration order.
+    fn to_json(&self) -> Result<String, Error>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// The fields every model has: what Java's `Model` superclass holds. Built only by a builder,

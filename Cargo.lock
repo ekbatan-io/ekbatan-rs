@@ -693,8 +693,10 @@ dependencies = [
  "sea-query",
  "sea-query-sqlx",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1992,6 +1994,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "zmij",
 ]
 
 [[package]]
@@ -3067,8 +3070,11 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "ekbatan",
+ "ekbatan-test-support",
+ "futures-util",
  "rust_decimal",
  "sea-query",
+ "serde",
  "serde_json",
  "sqlx",
  "testcontainers-modules",

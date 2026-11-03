@@ -1,106 +1,33 @@
 //! The wallet repository on real databases: PostgreSQL, MySQL and MariaDB, two shards each
 //! (two databases in one server). The same scenario runs on all three.
 
-use std::sync::Arc;
-
 use ekbatan::{
-    Clock, ConnectionProvider, DataSourceConfig, DatabaseRegistry, Dialect, Entity, Error, Model,
-    Persistable, Repository, ShardIdentifier, SystemClock, TransactionManager,
+    Clock, Dialect, Entity, Error, Model, Persistable, Repository, ShardIdentifier, SystemClock,
 };
 use rust_decimal::Decimal;
 use sea_query::{Asterisk, Cond, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query};
-use sqlx::Connection;
-use sqlx::mysql::MySqlConnection;
-use sqlx::postgres::PgConnection;
-use testcontainers_modules::mariadb::Mariadb;
-use testcontainers_modules::mysql::Mysql;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ImageExt;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use uuid::Uuid;
 use wallet_example::model::{Notification, NotificationState, Wallet, WalletState};
 use wallet_example::repository::{NotificationRepository, WalletRepository};
 use wallet_example::schema::{Wallets, WalletsRecord};
 
-const GLOBAL: ShardIdentifier = ShardIdentifier::new(0, 0);
-const MEXICO: ShardIdentifier = ShardIdentifier::new(1, 0);
+mod common;
 
-// The wallets table of the Java examples, per database (V0003__wallets.sql).
-const POSTGRES_WALLETS: &str = "CREATE TABLE wallets (id UUID PRIMARY KEY, version BIGINT NOT NULL, \
-    state VARCHAR(24) NOT NULL, owner_id UUID NOT NULL, currency CHAR(3) NOT NULL, \
-    balance DECIMAL(19, 4) NOT NULL, created_date TIMESTAMP NOT NULL, updated_date TIMESTAMP NOT NULL)";
-const MYSQL_WALLETS: &str = "CREATE TABLE wallets (id CHAR(36) CHARACTER SET ascii NOT NULL, \
-    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, owner_id CHAR(36) CHARACTER SET ascii NOT NULL, \
-    currency CHAR(3) NOT NULL, balance DECIMAL(19, 4) NOT NULL, created_date DATETIME(6) NOT NULL, \
-    updated_date DATETIME(6) NOT NULL, PRIMARY KEY (id))";
-const MARIADB_WALLETS: &str = "CREATE TABLE wallets (id UUID PRIMARY KEY, version BIGINT NOT NULL, \
-    state VARCHAR(24) NOT NULL, owner_id UUID NOT NULL, currency CHAR(3) NOT NULL, \
-    balance DECIMAL(19, 4) NOT NULL, created_date DATETIME(6) NOT NULL, updated_date DATETIME(6) NOT NULL)";
-
-// The notifications table (V0004__notifications.sql). Created on the default shard only: the
-// notification repository is unsharded, so touching any other shard would fail.
-const POSTGRES_NOTIFICATIONS: &str = "CREATE TABLE notifications (id UUID PRIMARY KEY, \
-    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id UUID NOT NULL, \
-    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL)";
-const MYSQL_NOTIFICATIONS: &str = "CREATE TABLE notifications (id CHAR(36) CHARACTER SET ascii NOT NULL, \
-    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id CHAR(36) CHARACTER SET ascii NOT NULL, \
-    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL, PRIMARY KEY (id))";
-const MARIADB_NOTIFICATIONS: &str = "CREATE TABLE notifications (id UUID PRIMARY KEY, \
-    version BIGINT NOT NULL, state VARCHAR(24) NOT NULL, wallet_id UUID NOT NULL, \
-    kind VARCHAR(48) NOT NULL, recipient VARCHAR(255) NOT NULL, message TEXT NOT NULL)";
+use common::{GLOBAL, MEXICO, start};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_postgres() {
-    let container = Postgres::default()
-        .with_tag("17-alpine")
-        .start()
-        .await
-        .expect("PostgreSQL starts");
-    let port = container.get_host_port_ipv4(5432).await.expect("a port");
-    let server = Server {
-        dialect: Dialect::Postgres,
-        host: format!("postgres://127.0.0.1:{port}"),
-        username: "postgres",
-        password: Some("postgres"),
-        first_database: "postgres",
-    };
-    run_scenario(&server, POSTGRES_WALLETS, POSTGRES_NOTIFICATIONS).await;
+    run_scenario(&start(Dialect::Postgres).await).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_mysql() {
-    let container = Mysql::default()
-        .with_tag("8.4")
-        .start()
-        .await
-        .expect("MySQL starts");
-    let port = container.get_host_port_ipv4(3306).await.expect("a port");
-    let server = Server {
-        dialect: Dialect::MySql,
-        host: format!("mysql://127.0.0.1:{port}"),
-        username: "root",
-        password: None,
-        first_database: "test",
-    };
-    run_scenario(&server, MYSQL_WALLETS, MYSQL_NOTIFICATIONS).await;
+    run_scenario(&start(Dialect::MySql).await).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_mariadb() {
-    let container = Mariadb::default()
-        .with_tag("11.8")
-        .start()
-        .await
-        .expect("MariaDB starts");
-    let port = container.get_host_port_ipv4(3306).await.expect("a port");
-    let server = Server {
-        dialect: Dialect::MariaDb,
-        host: format!("mysql://127.0.0.1:{port}"),
-        username: "root",
-        password: None,
-        first_database: "test",
-    };
-    run_scenario(&server, MARIADB_WALLETS, MARIADB_NOTIFICATIONS).await;
+    run_scenario(&start(Dialect::MariaDb).await).await;
 }
 
 /// The same statement, written for each database by sea-query.
@@ -119,83 +46,9 @@ fn one_statement_two_sql_flavours() {
     println!("MySQL / MariaDB: {}", update.to_string(MysqlQueryBuilder));
 }
 
-/// A test database server: where it listens, and how to log in.
-struct Server {
-    dialect: Dialect,
-    host: String,
-    username: &'static str,
-    password: Option<&'static str>,
-    first_database: &'static str,
-}
-
-impl Server {
-    /// The settings an app would read from its config, for one database on this server.
-    fn config(&self, database: &str) -> DataSourceConfig {
-        DataSourceConfig {
-            username: Some(self.username.to_owned()),
-            password: self.password.map(str::to_owned),
-            ..DataSourceConfig::new(self.dialect, format!("{}/{database}", self.host), 5)
-        }
-    }
-
-    /// Setup SQL, run with plain sqlx: creating databases and tables isn't ekbatan's job.
-    async fn run_sql(&self, database: &str, sql: &'static str) {
-        let login = match self.password {
-            Some(password) => format!("{}:{password}@", self.username),
-            None => format!("{}@", self.username),
-        };
-        let host = self.host.replacen("://", &format!("://{login}"), 1);
-        let url = format!("{host}/{database}");
-        match self.dialect {
-            Dialect::Postgres => {
-                let mut connection = PgConnection::connect(&url).await.expect("connects");
-                sqlx::raw_sql(sql)
-                    .execute(&mut connection)
-                    .await
-                    .expect("setup SQL runs");
-            }
-            Dialect::MySql | Dialect::MariaDb => {
-                let mut connection = MySqlConnection::connect(&url).await.expect("connects");
-                sqlx::raw_sql(sql)
-                    .execute(&mut connection)
-                    .await
-                    .expect("setup SQL runs");
-            }
-        }
-    }
-}
-
-/// What an app builds from its config: per shard, a primary pool and a replica pool in a
-/// `TransactionManager`, all in a `DatabaseRegistry`. Here two databases on one server stand in
-/// for two shards, and a second pool on the same database stands in for the replica.
-async fn registry(
-    server: &Server,
-    create_wallets: &'static str,
-    create_notifications: &'static str,
-) -> Arc<DatabaseRegistry> {
-    server
-        .run_sql(server.first_database, "CREATE DATABASE shard_1_0")
-        .await;
-    let mut transaction_managers = Vec::new();
-    for (shard, database) in [(GLOBAL, server.first_database), (MEXICO, "shard_1_0")] {
-        server.run_sql(database, create_wallets).await;
-        if shard == GLOBAL {
-            server.run_sql(database, create_notifications).await;
-        }
-        let primary = ConnectionProvider::from_config(&server.config(database)).expect("a pool");
-        let secondary = ConnectionProvider::from_config(&server.config(database)).expect("a pool");
-        transaction_managers.push(TransactionManager::new(shard, primary, Some(secondary)));
-    }
-    Arc::new(DatabaseRegistry::new(GLOBAL, transaction_managers).expect("a registry"))
-}
-
-async fn run_scenario(
-    server: &Server,
-    create_wallets: &'static str,
-    create_notifications: &'static str,
-) {
+async fn run_scenario(server: &common::Server) {
     let dialect = server.dialect;
-    let registry = registry(server, create_wallets, create_notifications).await;
+    let registry = server.registry().await;
     let wallets = WalletRepository::new(registry.clone());
     let owner = Uuid::new_v4();
     let say = |what: &str| println!("[{dialect:?}] {what}");

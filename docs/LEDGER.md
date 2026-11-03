@@ -31,6 +31,16 @@
   `ShardingStrategy` (`NoSharding`, the default: one shard, `dbs()` = default only;
   `EmbeddedBits`), and `ShardKey` resolves through it. One `Repository` trait serves models and
   entities (Java's `ModelRepository` / `EntityRepository` differ only in the persistable).
+- Actions (item 3): `Action` (plan passed in), `ActionPlan` / `PersistableChanges` (one row
+  staged once), `ActionRegistry`, `RepositoryRegistry` (type-erased dispatch to each type's
+  repository), `ActionExecutor` (fresh plan per attempt, group by shard, refuse cross-shard
+  unless allowed, one transaction per shard with the event rows, partial-commit alarm, retries
+  by `RetryOn`), `ExecutionConfiguration` / `RetryConfig`, Java's namespace rule. Test support:
+  `ActionSpec`, `ActionAssert`. Example: Java's four actions.
+- Event log (item 4): `EventPersister`, `SingleTableJsonEventPersister` (one row per event, one
+  row with no event when none), `EventEntity`, `EventEntityRepository` on `eventlog.events`;
+  `ekbatan::json` writes params and payloads as Jackson does (numbers in Java's forms), checked
+  against Java's recorded output; `Id` / `ShardedId` as `{"id":...,"value":...}`.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -44,8 +54,8 @@ the database), linted, and committed before the next starts.
 |---|---|---|---|
 | 1 | Clock: `Clock`, `SystemClock`, `VirtualClock` (frozen / skewed / real time); UTC, microseconds | `ekbatan-test-support` `VirtualClock`; py `clock.py`, `time.py` | done (EKB-0005) |
 | 2 | Model layer: `Model` / `Entity`, builders, `ModelEvent`; the `#[model]`, `#[entity]`, `#[model_event]` macros; entities; sharding strategies (`NoShardingStrategy`, embedded bits) | `domain/`, `repository/`, `shard/`; py `domain.py`, `repository.py`, `sharding.py` | done (EKB-0006) |
-| 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | |
-| 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | |
+| 3 | Actions: `Action`, `ActionPlan`, `ActionExecutor` (persist plan and events in one transaction per shard, retries on stale records, cross-shard check), `ActionRegistry`; action test support (`ActionSpec` / `ActionAssert`) | `action/`, `ekbatan-test-support`; py `action/`, `testing.py` | done (EKB-0007) |
+| 4 | Events: event log tables, `EventPersister` (single-table JSON), event serialization byte-compatible with Java's | `action/persister/event`, `ekbatan-action-event-json`; py `events/`, `_json.py` | done (EKB-0007) |
 | 5 | Migrations: framework tables per database, the app's own migrations | Flyway; py `migrations.py` (yoyo) | |
 | 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | |
 | 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | |
@@ -62,5 +72,4 @@ the database), linted, and committed before the next starts.
 - `find_all_by_ids` on MariaDB uses `IN (...)` (Java checks only MySQL; jOOQ rewrites the rest).
 - No `#[repository]` macro: a repository implements the `Repository` trait by hand
   (`from_record` / `to_record`), as Java's subclasses do; a macro would save little.
-- `Decimal` in events: serde writes it as a string ("15"), Jackson as a number (15). To settle
-  in item 4 (event serialization byte-compatible with Java).
+- Judgement calls for the user are in `docs/DECISIONS-TO-REVIEW.md`.

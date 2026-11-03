@@ -44,6 +44,32 @@ pub enum Error {
     Unexpected(String),
     /// A setting that can't work, such as a pool of zero connections.
     Config(String),
+    /// A value that can't be written as JSON, or JSON that can't be read back.
+    Json(serde_json::Error),
+    /// An action's own failure: what a Java action throws. Carries the app's error, which
+    /// `ExecutionConfiguration` can retry by type.
+    Action(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl Error {
+    /// Wraps an app's own error as an action failure: `Err(Error::action(InsufficientFunds))`.
+    pub fn action(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Error::Action(Box::new(error))
+    }
+
+    /// The app's error inside `Error::Action`, if it is an `E`.
+    pub fn action_error<E: std::error::Error + 'static>(&self) -> Option<&E> {
+        match self {
+            Error::Action(error) => error.downcast_ref::<E>(),
+            _ => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Error::Json(error)
+    }
 }
 
 impl From<sqlx::Error> for Error {
@@ -88,6 +114,8 @@ impl fmt::Display for Error {
             }
             Error::TooManyRows { table } => write!(f, "more than one row of {table} matched"),
             Error::Unexpected(message) => write!(f, "{message}"),
+            Error::Json(error) => write!(f, "JSON error: {error}"),
+            Error::Action(error) => write!(f, "{error}"),
         }
     }
 }
@@ -96,6 +124,8 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Database(error) => Some(error),
+            Error::Json(error) => Some(error),
+            Error::Action(error) => Some(&**error),
             _ => None,
         }
     }

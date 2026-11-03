@@ -12,8 +12,10 @@ rust_decimal.workspace = true
 sea-query.workspace = true
 sea-query-sqlx.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true

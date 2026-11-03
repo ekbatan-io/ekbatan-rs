@@ -10,12 +10,15 @@
 //! - `Db`: where statements run and which SQL to write: jOOQ's `DSLContext`.
 //! - `Repository`: Java's `AbstractRepository`, with the database selectors.
 
+pub mod action;
 mod clock;
 mod config;
 mod connection;
-mod db;
+pub(crate) mod db;
 mod domain;
 mod error;
+mod ids_json;
+pub mod json;
 mod registry;
 mod repository;
 mod shard;
@@ -27,8 +30,8 @@ pub use config::DataSourceConfig;
 pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
 pub use domain::{
-    Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase, ModelBuilderBase,
-    ModelEvent, ModelId, Persistable,
+    AnyModelEvent, Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase,
+    ModelBuilderBase, ModelEvent, ModelId, Persistable,
 };
 pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};

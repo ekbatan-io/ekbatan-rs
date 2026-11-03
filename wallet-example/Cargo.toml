@@ -8,11 +8,14 @@ publish = false
 chrono.workspace = true
 ekbatan = { path = "../ekbatan" }
 rust_decimal.workspace = true
+serde.workspace = true
 sea-query.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ekbatan-test-support = { path = "../ekbatan-test-support" }
+futures-util.workspace = true
 serde_json = { workspace = true }
 testcontainers-modules.workspace = true
 tokio.workspace = true
