@@ -5,7 +5,7 @@ use sea_query::{Alias, Expr, ExprTrait, IntoIden, Order, Query};
 use uuid::Uuid;
 
 use crate::action::{json_text, json_value};
-use crate::db::Db;
+use crate::db::AsyncDb;
 use crate::{DbUuid, Error, Instant, truncate_to_micros};
 
 /// A notification's state: Java's `EventNotificationState`.
@@ -156,7 +156,7 @@ pub struct EventNotificationRepository;
 impl EventNotificationRepository {
     /// One multi-row INSERT.
     pub async fn add_all_no_result(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         notifications: &[EventNotification],
     ) -> Result<(), Error> {
         if notifications.is_empty() {
@@ -194,7 +194,7 @@ impl EventNotificationRepository {
         Ok(())
     }
 
-    fn select(db: &Db<'_>) -> sea_query::SelectStatement {
+    fn select(db: &AsyncDb<'_>) -> sea_query::SelectStatement {
         let dialect = db.dialect();
         let mut select = Query::select();
         select.from(table());
@@ -209,7 +209,7 @@ impl EventNotificationRepository {
     }
 
     async fn fetch(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         select: &sea_query::SelectStatement,
     ) -> Result<Vec<EventNotification>, Error> {
         let rows: Vec<Row> = db.fetch_all(select).await?;
@@ -219,7 +219,7 @@ impl EventNotificationRepository {
     /// Up to `limit` PENDING or FAILED notifications due by `now`, soonest first: Java's
     /// `findDue`.
     pub async fn find_due(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         limit: u64,
         now: Instant,
     ) -> Result<Vec<EventNotification>, Error> {
@@ -237,7 +237,7 @@ impl EventNotificationRepository {
 
     /// Every notification of one event.
     pub async fn find_by_event_id(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         event_id: Uuid,
     ) -> Result<Vec<EventNotification>, Error> {
         let mut select = Self::select(db);
@@ -246,13 +246,13 @@ impl EventNotificationRepository {
     }
 
     /// Every notification.
-    pub async fn find_all(db: &mut Db<'_>) -> Result<Vec<EventNotification>, Error> {
+    pub async fn find_all(db: &mut AsyncDb<'_>) -> Result<Vec<EventNotification>, Error> {
         let select = Self::select(db);
         Self::fetch(db, &select).await
     }
 
     async fn set(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         ids: &[Uuid],
         state: EventNotificationState,
         count_attempt: bool,
@@ -279,7 +279,7 @@ impl EventNotificationRepository {
 
     /// Java's `markSucceededAll`: SUCCEEDED, one more attempt.
     pub async fn mark_succeeded_all(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         ids: &[Uuid],
         now: Instant,
     ) -> Result<u64, Error> {
@@ -288,7 +288,7 @@ impl EventNotificationRepository {
 
     /// Java's `markFailedBucket`: FAILED, one more attempt, retried at `next_retry_at`.
     pub async fn mark_failed_bucket(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         ids: &[Uuid],
         next_retry_at: Instant,
         now: Instant,
@@ -306,7 +306,7 @@ impl EventNotificationRepository {
 
     /// Java's `markExpiredAllPreflight`: EXPIRED before running (no attempt counted).
     pub async fn mark_expired_all_preflight(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         ids: &[Uuid],
         now: Instant,
     ) -> Result<u64, Error> {
@@ -315,7 +315,7 @@ impl EventNotificationRepository {
 
     /// Java's `markExpiredAllPostFailure`: EXPIRED after a failed attempt.
     pub async fn mark_expired_all_post_failure(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         ids: &[Uuid],
         now: Instant,
     ) -> Result<u64, Error> {

@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+pub use crate::sync_api::jobs::DistributedJob;
 pub use config::{JobsConfig, parse_iso_duration};
 pub use schedule::Schedule;
 
@@ -50,7 +51,7 @@ pub const DEFAULT_SHUTDOWN_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 /// A job that runs on one instance per scheduled slot: Java's `DistributedJob`.
 ///
 /// `execute` must be idempotent: a slot can run twice (see the module docs).
-pub trait DistributedJob: Send + Sync + 'static {
+pub trait AsyncDistributedJob: Send + Sync + 'static {
     /// Cluster-wide unique and stable: the job row's key. Asked once, when the registry is
     /// built.
     fn name(&self) -> String;
@@ -140,7 +141,7 @@ trait AnyJob: Send + Sync {
 
 struct Erased<J>(J);
 
-impl<J: DistributedJob> AnyJob for Erased<J> {
+impl<J: AsyncDistributedJob> AnyJob for Erased<J> {
     fn execute<'a>(&'a self, ctx: &'a ExecutionContext) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(self.0.execute(ctx))
     }
@@ -307,7 +308,7 @@ impl JobRegistryBuilder {
     }
 
     /// Adds a job. Its `name()` and `schedule()` are asked once, here.
-    pub fn with_job<J: DistributedJob>(mut self, job: J) -> Self {
+    pub fn with_job<J: AsyncDistributedJob>(mut self, job: J) -> Self {
         self.jobs.push(Job {
             name: job.name(),
             schedule: job.schedule(),
@@ -365,14 +366,14 @@ impl JobRegistryBuilder {
             .ok_or_else(|| Error::Config("connectionProvider is required".to_owned()))?;
         if self.jobs.is_empty() {
             return Err(Error::Config(
-                "at least one DistributedJob must be registered".to_owned(),
+                "at least one AsyncDistributedJob must be registered".to_owned(),
             ));
         }
         let mut names: Vec<&str> = Vec::new();
         for job in &self.jobs {
             if job.name.trim().is_empty() {
                 return Err(Error::Config(
-                    "a DistributedJob returned a blank name(); the name is its row's key in \
+                    "a AsyncDistributedJob returned a blank name(); the name is its row's key in \
                      scheduled_tasks"
                         .to_owned(),
                 ));
@@ -383,7 +384,7 @@ impl JobRegistryBuilder {
         sorted.sort();
         if sorted.windows(2).any(|w| w[0] == w[1]) {
             return Err(Error::Config(format!(
-                "DistributedJob names must be unique within a JobRegistry; got: {names:?}"
+                "AsyncDistributedJob names must be unique within a JobRegistry; got: {names:?}"
             )));
         }
         if self.poll_interval.is_zero() {

@@ -1,5 +1,5 @@
 //! Actions: Java's `io.ekbatan.core.action`. An action stages changes on an `ActionPlan`; the
-//! `ActionExecutor` writes them, with the events the models carry, in one transaction per shard.
+//! `AsyncActionExecutor` writes them, with the events the models carry, in one transaction per shard.
 
 mod config;
 mod event_persister;
@@ -14,13 +14,14 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+pub use crate::sync_api::action::{Action, ActionExecutor, ActionExecutorBuilder};
 pub use config::{ExecutionConfiguration, RetryConfig, RetryOn};
 pub use event_persister::{
     EmittedEvent, EventEntity, EventEntityRepository, EventPersister,
     SingleTableJsonEventPersister, event_payload,
 };
 pub(crate) use event_persister::{json_text, json_value};
-pub use executor::{ActionExecutor, ActionExecutorBuilder};
+pub use executor::{AsyncActionExecutor, AsyncActionExecutorBuilder};
 pub use plan::{ActionPlan, AnyChanges, PersistableChanges};
 pub use repository_registry::{AnyRepository, RepositoryRegistry, RepositoryRegistryBuilder};
 
@@ -32,7 +33,7 @@ use crate::Error;
 ///
 /// `perform` returns `Err` to abort: nothing it staged is written. An app's own error goes in
 /// `Error::action(...)`.
-pub trait Action: Send + Sync + 'static {
+pub trait AsyncAction: Send + Sync + 'static {
     /// The input. Written to the event log as JSON, so it must serialize to a JSON object.
     type Params: Serialize + Send + Sync;
     type Result: Send;
@@ -47,7 +48,7 @@ pub trait Action: Send + Sync + 'static {
 
 /// The simple name of an action type, as Java's `getSimpleName()`: the event log's
 /// `action_name`.
-pub fn action_name<A: Action>() -> &'static str {
+pub fn action_name<A: AsyncAction>() -> &'static str {
     let full = std::any::type_name::<A>();
     full.rsplit("::").next().unwrap_or(full)
 }
@@ -63,7 +64,7 @@ impl ActionRegistry {
         ActionRegistryBuilder::default()
     }
 
-    pub fn get<A: Action>(&self) -> Result<Arc<A>, Error> {
+    pub fn get<A: AsyncAction>(&self) -> Result<Arc<A>, Error> {
         self.actions
             .get(&TypeId::of::<A>())
             .and_then(|action| action.clone().downcast::<A>().ok())
@@ -82,7 +83,7 @@ pub struct ActionRegistryBuilder {
 }
 
 impl ActionRegistryBuilder {
-    pub fn with_action<A: Action>(mut self, action: A) -> Self {
+    pub fn with_action<A: AsyncAction>(mut self, action: A) -> Self {
         self.actions.insert(TypeId::of::<A>(), Arc::new(action));
         self
     }

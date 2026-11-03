@@ -1,4 +1,4 @@
-use crate::{Connection, ConnectionProvider, Db, Dialect, Error, ShardIdentifier};
+use crate::{AsyncDb, Connection, ConnectionProvider, Dialect, Error, ShardIdentifier};
 
 /// One shard's pools and transactions: Java's `TransactionManager`. Statements outside a
 /// transaction borrow from the pools (through `DatabaseRegistry`); a transaction holds one
@@ -41,18 +41,34 @@ impl TransactionManager {
         &self.secondary_connection_provider
     }
 
+    /// The async view: `begin().await` and `in_transaction(...).await`.
+    pub fn as_async(&self) -> AsyncTransactionManager<'_> {
+        AsyncTransactionManager(self)
+    }
+}
+
+/// A shard's transactions, waited on with `.await`: the async twin of `TransactionManager`'s
+/// `begin` and `in_transaction` (Python's `AsyncTransactionManager`). `manager.as_async()`.
+#[derive(Clone, Copy)]
+pub struct AsyncTransactionManager<'a>(&'a TransactionManager);
+
+impl<'a> AsyncTransactionManager<'a> {
+    pub fn shard_identifier(&self) -> ShardIdentifier {
+        self.0.shard_identifier
+    }
+
     /// Takes a primary connection and opens a transaction on it. End it with `commit()` or
     /// `rollback()`; a transaction dropped without either has its connection closed.
-    pub async fn begin(&self) -> Result<Transaction, Error> {
-        let connection = self.primary_connection_provider.acquire().await?;
-        Transaction::begin(connection, self.shard_identifier).await
+    pub async fn begin(&self) -> Result<AsyncTransaction, Error> {
+        let connection = self.0.primary_connection_provider.acquire().await?;
+        AsyncTransaction::begin(connection, self.0.shard_identifier).await
     }
 
     /// Java's `inTransaction(block)`: commits if the block returns `Ok`, rolls back if it
     /// returns `Err`, keeping the block's error as Java does.
     pub async fn in_transaction<R>(
         &self,
-        block: impl AsyncFnOnce(&mut Transaction) -> Result<R, Error>,
+        block: impl AsyncFnOnce(&mut AsyncTransaction) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut tx = self.begin().await?;
         match block(&mut tx).await {
@@ -70,13 +86,13 @@ impl TransactionManager {
 
 /// A connection with a transaction open on it: Java's `Transaction`, a JDBC `Connection` with
 /// auto-commit off.
-pub struct Transaction {
+pub struct AsyncTransaction {
     connection: Connection,
     shard_identifier: ShardIdentifier,
     open: bool,
 }
 
-impl Transaction {
+impl AsyncTransaction {
     async fn begin(
         mut connection: Connection,
         shard_identifier: ShardIdentifier,
@@ -89,7 +105,7 @@ impl Transaction {
             connection.evict();
             return Err(error);
         }
-        Ok(Transaction {
+        Ok(AsyncTransaction {
             connection,
             shard_identifier,
             open: true,
@@ -101,7 +117,7 @@ impl Transaction {
     }
 
     /// Statements inside the transaction.
-    pub fn db(&mut self) -> Db<'_> {
+    pub fn db(&mut self) -> AsyncDb<'_> {
         self.connection.db()
     }
 
@@ -130,7 +146,7 @@ impl Transaction {
     }
 }
 
-impl Drop for Transaction {
+impl Drop for AsyncTransaction {
     /// Never ended, or its rollback failed: close the connection rather than return it, so no
     /// one inherits a half-done transaction. The database rolls back what a closed connection
     /// leaves open.

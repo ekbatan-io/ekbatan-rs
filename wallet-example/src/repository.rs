@@ -5,15 +5,17 @@
 //! - `tx_db_else_db(tx, key)`: the caller's transaction if given one, else the primary.
 //!
 //! The ready-made methods (`find_by_id`, `get_by_id`, `exists_by_id`, `find_all_where`,
-//! `count_where`, `add`, `update`, ...) come from `ekbatan::Repository`.
+//! `count_where`, `add`, `update`, ...) come from `ekbatan::Repository` (sync) and `ekbatan::aio::AsyncRepository` (async, used
+//! here); a repository implements `AbstractRepository`.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ekbatan::aio::{AsyncRepository, AsyncTransaction};
 use ekbatan::{
-    DatabaseRegistry, DbUuid, Error, Id, Model, Persistable, Repository, ShardIdentifier,
-    ShardedId, ShardingStrategy, TableRecord, Transaction,
+    AbstractRepository, DatabaseRegistry, DbUuid, Error, Id, Model, Persistable, ShardIdentifier,
+    ShardedId, ShardingStrategy, TableRecord,
 };
 use rust_decimal::Decimal;
 use sea_query::{Asterisk, Expr, ExprTrait, Func, Order, Query};
@@ -35,7 +37,7 @@ impl WalletRepository {
     }
 }
 
-impl Repository for WalletRepository {
+impl AbstractRepository for WalletRepository {
     type Persistable = Wallet;
     type Record = WalletsRecord;
 
@@ -89,7 +91,7 @@ impl NotificationRepository {
     }
 }
 
-impl Repository for NotificationRepository {
+impl AbstractRepository for NotificationRepository {
     type Persistable = Notification;
     type Record = NotificationsRecord;
 
@@ -153,7 +155,7 @@ impl WalletRepository {
     /// own on the primary. The wallets must share a shard: one transaction can't span two.
     pub async fn mark_all_settled(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         ids: &[ShardedId<Wallet>],
     ) -> Result<u64, Error> {
         let Some(first) = ids.first() else {
@@ -192,7 +194,7 @@ impl WalletRepository {
     /// row was added. (`ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT IGNORE` on the others.)
     pub async fn add_if_absent(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         wallet: &Wallet,
     ) -> Result<bool, Error> {
         let (columns, values): (Vec<_>, Vec<_>) =
@@ -259,7 +261,7 @@ impl WalletRepository {
     /// it gets `StaleRecord`. Returns how many it closed.
     pub async fn close_empty_wallets(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         shard: ShardIdentifier,
     ) -> Result<u64, Error> {
         let update = Query::update()

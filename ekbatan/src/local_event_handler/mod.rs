@@ -16,7 +16,10 @@ mod handler;
 mod jobs;
 mod notification;
 
+pub use crate::sync_api::jobs::EventHandler;
 pub use config::LocalEventHandlerConfig;
-pub use handler::{EventEnvelope, EventHandler, EventHandlerRegistry, EventHandlerRegistryBuilder};
+pub use handler::{
+    AsyncEventHandler, EventEnvelope, EventHandlerRegistry, EventHandlerRegistryBuilder,
+};
 pub use jobs::{EventFanoutJob, EventHandlingJob, backoff_delay};
 pub use notification::{EventNotification, EventNotificationRepository, EventNotificationState};

@@ -55,7 +55,7 @@ impl<T> Scalar for T where
 /// Where statements run and which SQL to write for them: jOOQ's `DSLContext`. On a pool, each
 /// statement borrows a connection just while it runs; on a held `Connection` (a transaction is
 /// one), every statement uses that connection.
-pub struct Db<'a> {
+pub struct AsyncDb<'a> {
     target: Target<'a>,
     dialect: Dialect,
 }
@@ -65,7 +65,7 @@ enum Target<'a> {
     Connection(&'a mut PooledConnection),
 }
 
-/// Runs `$run` with the SQL (`$sql`) and bound values (`$values`) written for this `Db`'s
+/// Runs `$run` with the SQL (`$sql`) and bound values (`$values`) written for this `AsyncDb`'s
 /// database, and the pool or connection to run it on (`$executor`).
 macro_rules! on_database {
     ($db:expr, postgres: $postgres:expr, mysql: $mysql:expr, |$sql:ident, $values:ident, $executor:ident| $run:expr) => {
@@ -98,16 +98,16 @@ macro_rules! on_database {
     };
 }
 
-impl<'a> Db<'a> {
+impl<'a> AsyncDb<'a> {
     pub(crate) fn on_pool(pool: &'a Pool, dialect: Dialect) -> Self {
-        Db {
+        AsyncDb {
             target: Target::Pool(pool),
             dialect,
         }
     }
 
     pub(crate) fn on_connection(connection: &'a mut PooledConnection, dialect: Dialect) -> Self {
-        Db {
+        AsyncDb {
             target: Target::Connection(connection),
             dialect,
         }
@@ -276,10 +276,10 @@ impl<'a> Db<'a> {
     }
 }
 
-/// One `Db` per shard, for asking every shard at once: Java's `dbs()` / `readonlyDbs()`.
-pub struct Dbs<'a>(pub Vec<Db<'a>>);
+/// One `AsyncDb` per shard, for asking every shard at once: Java's `dbs()` / `readonlyDbs()`.
+pub struct AsyncDbs<'a>(pub Vec<AsyncDb<'a>>);
 
-impl<'a> Dbs<'a> {
+impl<'a> AsyncDbs<'a> {
     /// Runs `select` on every shard at the same time and returns all the rows.
     pub async fn fetch_all<R: Record>(self, select: &SelectStatement) -> Result<Vec<R>, Error> {
         let per_shard = try_join_all(
@@ -301,7 +301,7 @@ impl<'a> Dbs<'a> {
         .await
     }
 
-    pub fn into_vec(self) -> Vec<Db<'a>> {
+    pub fn into_vec(self) -> Vec<AsyncDb<'a>> {
         self.0
     }
 }

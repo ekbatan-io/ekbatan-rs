@@ -168,3 +168,44 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
 6. `LocalEventHandlerConfig` reads `ekbatan.local-event-handler` (Java's keys; ISO-8601
    durations); `handling.enabled` is off unless set, as in Java. Wiring the jobs into a
    `JobRegistry` is the app's (Java's DI does it); the example shows it.
+
+## Sync and async APIs side by side (2026-11-04)
+
+The user chose to wrap the async code (not a second, synchronous database driver), and then to
+name things as Python does: plain names sync, `Async*` names async in `ekbatan::aio`.
+
+1. **Names, as Java and Python**: `Action`, `ActionExecutor`, `Repository`, `Db`, `Dbs`,
+   `Transaction`, `KeyedLockProvider`, `Lease`, `DistributedJob`, `EventHandler` and test
+   support's `ActionSpec` are sync, at their usual paths. Their twins are `AsyncAction`,
+   `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncDbs`, `AsyncTransaction`,
+   `AsyncKeyedLockProvider`, `AsyncLease`, `AsyncDistributedJob`, `AsyncEventHandler` in
+   `ekbatan::aio`, and `AsyncActionSpec` in `ekbatan_test_support::aio`. (`ekbatan::async` is
+   impossible: `async` is a reserved word.) The `Async*` types can also still be reached at
+   their topic modules' paths (`ekbatan::action::AsyncAction`).
+2. **`AbstractRepository` (Java's name) is what a repository implements**: types, `registry`,
+   `from_record`, `to_record`, `sharding_strategy`. `Repository` (sync) and `AsyncRepository`
+   are given to every `AbstractRepository`, so one repository serves both. Without that split,
+   async code needing `from_record` also pulled in the sync methods of the same names.
+3. **Shared types keep plain names, with sync methods and an async view**: `DatabaseRegistry`
+   (`primary`, `secondary`, `primaries`, `secondaries`, `close`) and `TransactionManager`
+   (`begin`, `in_transaction`) wait; `.as_async()` gives `AsyncDatabaseRegistry` /
+   `AsyncTransactionManager` (Python's names) with the `.await` versions.
+4. **One copy of every rule.** The async code is the engine; the sync API waits on it. A sync
+   `Action`, `DistributedJob` or `EventHandler` *is* an async one too (blanket impls), so it
+   registers in the same registries and runs in the same executor and jobs. The sync
+   `ActionExecutor` runs async actions too.
+5. **Its own tokio runtime** (`blocking_runtime()`, multi-threaded, made on first use). A pool
+   made outside any runtime is put on it. Sync code inside an action, job or handler steps off
+   the runtime thread (`block_in_place`) before waiting.
+6. **Sync API not for async code**: called from inside an async function it blocks that thread,
+   and on a single-threaded runtime it panics, as `reqwest::blocking` does. Documented, not
+   guarded.
+7. **Still async only, run with `ekbatan::block_on(...)` from sync code**: migrations
+   (`Migrator::migrate`), `JobRegistry::start` / `stop`, `ConnectionProvider::acquire` /
+   `close`, the event log and notification repositories' functions, and the event jobs'
+   `drain_one_round`. These keep their names: they are not the request path (Python's `aio`
+   draws the same line), and an `Async` copy of each looked like noise. Say if you want sync
+   twins for any.
+8. **The wallet example stays async** (`AsyncAction`, `AsyncRepository`), as it was written;
+   `wallet-example/tests/sync_api.rs` shows the sync API end to end.
+9. Always compiled; no cargo feature (it adds no dependency).

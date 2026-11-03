@@ -4,7 +4,7 @@ use sqlx::mysql::{MySql, MySqlPool};
 use sqlx::pool::{PoolConnection, PoolOptions};
 use sqlx::postgres::{PgPool, Postgres};
 
-use crate::{DataSourceConfig, Db, Dialect, Error};
+use crate::{AsyncDb, DataSourceConfig, Dialect, Error};
 
 /// A pool of connections to one database: Java's `ConnectionProvider` (a HikariCP pool there, a
 /// sqlx pool here). Cloning it is cheap and shares the same pool.
@@ -40,14 +40,17 @@ impl ConnectionProvider {
             )));
         }
         config.validate()?;
-        let pool = match config.dialect {
-            Dialect::Postgres => {
-                Pool::Postgres(pool_options(config).connect_lazy_with(config.postgres_options()?))
-            }
-            Dialect::MySql | Dialect::MariaDb => {
-                Pool::MySql(pool_options(config).connect_lazy_with(config.mysql_options()?))
-            }
-        };
+        // Made outside any runtime (sync code), the pool lives on the sync API's runtime.
+        let pool = crate::sync_api::in_some_runtime(|| -> Result<Pool, Error> {
+            Ok(match config.dialect {
+                Dialect::Postgres => Pool::Postgres(
+                    pool_options(config).connect_lazy_with(config.postgres_options()?),
+                ),
+                Dialect::MySql | Dialect::MariaDb => {
+                    Pool::MySql(pool_options(config).connect_lazy_with(config.mysql_options()?))
+                }
+            })
+        })?;
         Ok(ConnectionProvider {
             pool,
             dialect: config.dialect,
@@ -78,8 +81,8 @@ impl ConnectionProvider {
 
     /// Statements that each borrow a connection only while they run: what Java's `DSLContext`
     /// over the data source does.
-    pub fn db(&self) -> Db<'_> {
-        Db::on_pool(&self.pool, self.dialect)
+    pub fn db(&self) -> AsyncDb<'_> {
+        AsyncDb::on_pool(&self.pool, self.dialect)
     }
 
     /// How many connections are open now.
@@ -151,8 +154,8 @@ impl Connection {
     }
 
     /// Statements on this one connection.
-    pub fn db(&mut self) -> Db<'_> {
-        Db::on_connection(&mut self.inner, self.dialect)
+    pub fn db(&mut self) -> AsyncDb<'_> {
+        AsyncDb::on_connection(&mut self.inner, self.dialect)
     }
 
     /// Closes the connection instead of returning it to the pool: Java's `evict(connection)`.

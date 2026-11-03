@@ -30,7 +30,7 @@ pub struct EventEnvelope<E> {
 }
 
 /// Reacts to one event type: Java's `EventHandler<E>`.
-pub trait EventHandler: Send + Sync + 'static {
+pub trait AsyncEventHandler: Send + Sync + 'static {
     /// The event type this handler subscribes to.
     type Event: AnyModelEvent + DeserializeOwned + Send;
 
@@ -60,7 +60,7 @@ pub(crate) trait AnyEventHandler: Send + Sync {
 
 struct Erased<H>(H);
 
-impl<H: EventHandler> AnyEventHandler for Erased<H> {
+impl<H: AsyncEventHandler> AnyEventHandler for Erased<H> {
     fn event_type(&self) -> &'static str {
         event_type_name::<H::Event>()
     }
@@ -136,7 +136,7 @@ pub struct EventHandlerRegistryBuilder {
 
 impl EventHandlerRegistryBuilder {
     /// Adds a handler. Its `name()` and `aliases()` are asked once, here.
-    pub fn with_handler<H: EventHandler>(mut self, handler: H) -> Self {
+    pub fn with_handler<H: AsyncEventHandler>(mut self, handler: H) -> Self {
         let name = handler.name();
         let aliases = handler.aliases();
         self.handlers
@@ -151,12 +151,12 @@ impl EventHandlerRegistryBuilder {
             for key in std::iter::once(&name).chain(&aliases) {
                 if key.trim().is_empty() {
                     return Err(Error::Config(
-                        "an EventHandler name or alias is blank".to_owned(),
+                        "an AsyncEventHandler name or alias is blank".to_owned(),
                     ));
                 }
                 if registry.by_name.contains_key(key) {
                     return Err(Error::Config(format!(
-                        "EventHandler name or alias '{key}' is used twice"
+                        "AsyncEventHandler name or alias '{key}' is used twice"
                     )));
                 }
                 registry.by_name.insert(key.clone(), handler.clone());

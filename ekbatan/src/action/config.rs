@@ -73,7 +73,7 @@ impl fmt::Debug for RetryOn {
     }
 }
 
-/// Per-call, or per-executor default, knobs for `ActionExecutor`: Java's
+/// Per-call, or per-executor default, knobs for `AsyncActionExecutor`: Java's
 /// `ExecutionConfiguration`. The default retries a stale record once after 100ms and refuses
 /// an action that touches more than one shard.
 ///

@@ -25,17 +25,19 @@ use tracing::warn;
 use crate::{Connection, ConnectionProvider, Dialect, Error};
 
 /// How long one SQL wait lasts before it is asked again: Java's five-second segments.
+pub use crate::sync_api::keyed_lock::{KeyedLockProvider, Lease};
+
 const SEGMENT: Duration = Duration::from_secs(5);
 
 /// A keyed lock: Java's `KeyedLockProvider`.
-pub trait KeyedLockProvider: Send + Sync {
+pub trait AsyncKeyedLockProvider: Send + Sync {
     /// Waits until the key is free, then holds it until the lease is released, dropped, or
     /// `max_hold` passes.
     fn acquire<'a>(
         &'a self,
         key: &'a str,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Lease, Error>>;
+    ) -> BoxFuture<'a, Result<AsyncLease, Error>>;
 
     /// Waits up to `max_wait` (zero: don't wait). `None` if the key stayed held. Contention is
     /// never an error; a failing backend is.
@@ -44,7 +46,7 @@ pub trait KeyedLockProvider: Send + Sync {
         key: &'a str,
         max_wait: Duration,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Option<Lease>, Error>>;
+    ) -> BoxFuture<'a, Result<Option<AsyncLease>, Error>>;
 }
 
 /// Java's `LockKeyHash`: the first 8 bytes of the key's SHA-256, as a signed 64-bit number.
@@ -71,12 +73,12 @@ struct LeaseState {
 }
 
 /// A held lock: Java's `Lease`. `release()` frees it; dropping it frees it in the background.
-pub struct Lease {
+pub struct AsyncLease {
     state: Arc<LeaseState>,
 }
 
-impl Lease {
-    fn new(key: &str, held: Held, max_hold: Duration) -> Lease {
+impl AsyncLease {
+    fn new(key: &str, held: Held, max_hold: Duration) -> AsyncLease {
         let state = Arc::new(LeaseState {
             key: key.to_owned(),
             held: tokio::sync::Mutex::new(Some(held)),
@@ -95,7 +97,7 @@ impl Lease {
             }
         });
         *state.watchdog.lock().unwrap_or_else(|p| p.into_inner()) = Some(watchdog);
-        Lease { state }
+        AsyncLease { state }
     }
 
     pub fn key(&self) -> &str {
@@ -114,7 +116,7 @@ impl Lease {
     }
 }
 
-impl Drop for Lease {
+impl Drop for AsyncLease {
     fn drop(&mut self) {
         let state = self.state.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -192,15 +194,15 @@ impl InProcessKeyedLockProvider {
     }
 }
 
-impl KeyedLockProvider for InProcessKeyedLockProvider {
+impl AsyncKeyedLockProvider for InProcessKeyedLockProvider {
     fn acquire<'a>(
         &'a self,
         key: &'a str,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Lease, Error>> {
+    ) -> BoxFuture<'a, Result<AsyncLease, Error>> {
         Box::pin(async move {
             let guard = self.mutex(key).lock_owned().await;
-            Ok(Lease::new(key, Held::InProcess(guard), max_hold))
+            Ok(AsyncLease::new(key, Held::InProcess(guard), max_hold))
         })
     }
 
@@ -209,7 +211,7 @@ impl KeyedLockProvider for InProcessKeyedLockProvider {
         key: &'a str,
         max_wait: Duration,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Option<Lease>, Error>> {
+    ) -> BoxFuture<'a, Result<Option<AsyncLease>, Error>> {
         Box::pin(async move {
             let mutex = self.mutex(key);
             let guard = if max_wait.is_zero() {
@@ -219,7 +221,7 @@ impl KeyedLockProvider for InProcessKeyedLockProvider {
                     .await
                     .ok()
             };
-            Ok(guard.map(|g| Lease::new(key, Held::InProcess(g), max_hold)))
+            Ok(guard.map(|g| AsyncLease::new(key, Held::InProcess(g), max_hold)))
         })
     }
 }
@@ -339,7 +341,7 @@ impl SqlKeyedLockProvider {
         key: &str,
         max_wait: Option<Duration>,
         max_hold: Duration,
-    ) -> Result<Option<Lease>, Error> {
+    ) -> Result<Option<AsyncLease>, Error> {
         let failed =
             |e: Error| Error::Unexpected(format!("lock '{key}' could not be acquired: {e}"));
         let mut pending = Pending {
@@ -366,7 +368,7 @@ impl SqlKeyedLockProvider {
                         hashed,
                         dirty,
                     };
-                    return Ok(Some(Lease::new(key, held, max_hold)));
+                    return Ok(Some(AsyncLease::new(key, held, max_hold)));
                 }
                 Attempt::TimedOut => {
                     if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
@@ -380,12 +382,12 @@ impl SqlKeyedLockProvider {
     }
 }
 
-impl KeyedLockProvider for SqlKeyedLockProvider {
+impl AsyncKeyedLockProvider for SqlKeyedLockProvider {
     fn acquire<'a>(
         &'a self,
         key: &'a str,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Lease, Error>> {
+    ) -> BoxFuture<'a, Result<AsyncLease, Error>> {
         Box::pin(async move {
             Ok(self
                 .lock(key, None, max_hold)
@@ -399,14 +401,16 @@ impl KeyedLockProvider for SqlKeyedLockProvider {
         key: &'a str,
         max_wait: Duration,
         max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Option<Lease>, Error>> {
+    ) -> BoxFuture<'a, Result<Option<AsyncLease>, Error>> {
         Box::pin(self.lock(key, Some(max_wait), max_hold))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{AsyncKeyedLockProvider, InProcessKeyedLockProvider, lock_key_hash, mysql_name};
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
 
     #[test]
     fn keys_hash_as_javas_lock_key_hash() {

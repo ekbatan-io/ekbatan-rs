@@ -1,5 +1,5 @@
 //! The connection structs on PostgreSQL, logged in with a real password: `DataSourceConfig`,
-//! `ConnectionProvider`, `Connection`, `Transaction`, `TransactionManager`.
+//! `ConnectionProvider`, `Connection`, `AsyncTransaction`, `TransactionManager`.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -129,15 +129,15 @@ async fn connection_structs_on_postgres() {
         .from("notes")
         .to_owned();
 
-    let mut committed = manager.begin().await.unwrap();
+    let mut committed = manager.as_async().begin().await.unwrap();
     committed.db().execute(&note(1)).await.unwrap();
     committed.commit().await.unwrap();
 
-    let mut rolled_back = manager.begin().await.unwrap();
+    let mut rolled_back = manager.as_async().begin().await.unwrap();
     rolled_back.db().execute(&note(2)).await.unwrap();
     rolled_back.rollback().await.unwrap();
 
-    let mut abandoned = manager.begin().await.unwrap();
+    let mut abandoned = manager.as_async().begin().await.unwrap();
     let abandoned_pid: i32 = abandoned.db().fetch_scalar(&pid()).await.unwrap();
     abandoned.db().execute(&note(3)).await.unwrap();
     drop(abandoned);

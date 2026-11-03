@@ -8,10 +8,12 @@ use sea_query::{
 };
 use uuid::Uuid;
 
+use crate::sync_api::block_on;
 use crate::{
-    DatabaseRegistry, Db, Dbs, Dialect, Error, ModelId, Persistable, Record, ShardIdentifier,
-    ShardKey, ShardingStrategy, Transaction,
+    AsyncDb, AsyncDbs, AsyncTransaction, DatabaseRegistry, Dialect, Error, ModelId, Persistable,
+    Record, ShardIdentifier, ShardKey, ShardingStrategy,
 };
+use crate::{Db, Dbs, Transaction};
 
 /// A table, as schemagen writes it: its name and the columns the ready-made methods use.
 pub trait Table: Iden + PartialEq + Copy + Send + Sync + 'static {
@@ -29,8 +31,8 @@ pub trait TableRecord: Record + 'static {
     fn values(&self) -> Vec<(Self::Table, Value)>;
 }
 
-type TableOf<R> = <<R as Repository>::Record as TableRecord>::Table;
-type IdOf<R> = <<R as Repository>::Persistable as Persistable>::Id;
+type TableOf<R> = <<R as AbstractRepository>::Record as TableRecord>::Table;
+type IdOf<R> = <<R as AbstractRepository>::Persistable as Persistable>::Id;
 
 /// `state <> 'DELETED'`: Java's private `notDeleted()`. Only the ready-made methods use it;
 /// custom queries write their own condition when they want one.
@@ -190,7 +192,7 @@ fn update_all_sql<R: TableRecord>(dialect: Dialect, records: &[R]) -> (String, V
 /// a model or entity and back (`from_record` / `to_record`, as in Java) and, if it shards, its
 /// `sharding_strategy`; the selectors and the ready-made methods below work from that, with
 /// Java's SQL.
-pub trait Repository: Send + Sync {
+pub trait AbstractRepository: Send + Sync {
     type Persistable: Persistable;
     type Record: TableRecord;
 
@@ -212,69 +214,6 @@ pub trait Repository: Send + Sync {
             .resolve(self.sharding_strategy())
             .unwrap_or_else(|| registry.default_shard());
         registry.effective_shard(shard)
-    }
-
-    // ---- The database selectors. Each takes a shard key: `DefaultShard`, a `ShardIdentifier`,
-    // ---- or an id, which covers Java's overloads.
-
-    /// The primary: for writes, and reads that must be current. Java's `db(...)`.
-    fn db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
-        self.registry().primary(self.effective_shard(key)?)
-    }
-
-    /// Every shard's primary; only the default shard's under `NoSharding`. Java's `dbs()`.
-    fn dbs(&self) -> Dbs<'_> {
-        let registry = self.registry();
-        match self.sharding_strategy() {
-            ShardingStrategy::NoSharding => Dbs(registry
-                .primary(registry.default_shard())
-                .into_iter()
-                .collect()),
-            ShardingStrategy::EmbeddedBits => registry.primaries(),
-        }
-    }
-
-    /// The replica: for reads that may lag. Java's `readonlyDb(...)`.
-    fn readonly_db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
-        self.registry().secondary(self.effective_shard(key)?)
-    }
-
-    /// Every shard's replica; only the default shard's under `NoSharding`. Java's
-    /// `readonlyDbs()`.
-    fn readonly_dbs(&self) -> Dbs<'_> {
-        let registry = self.registry();
-        match self.sharding_strategy() {
-            ShardingStrategy::NoSharding => Dbs(registry
-                .secondary(registry.default_shard())
-                .into_iter()
-                .collect()),
-            ShardingStrategy::EmbeddedBits => registry.secondaries(),
-        }
-    }
-
-    /// The caller's transaction, refused if it is on another shard than the key. Java's
-    /// `txDb(...)`, which returns an empty `Optional` instead.
-    fn tx_db<'a>(&'a self, tx: &'a mut Transaction, key: impl ShardKey) -> Result<Db<'a>, Error> {
-        let shard = self.effective_shard(key)?;
-        if tx.shard() != shard {
-            return Err(Error::WrongShard {
-                transaction: tx.shard(),
-                row: shard,
-            });
-        }
-        Ok(tx.db())
-    }
-
-    /// The caller's transaction if given one, else the primary. Java's `txDbElseDb(...)`.
-    fn tx_db_else_db<'a>(
-        &'a self,
-        tx: Option<&'a mut Transaction>,
-        key: impl ShardKey,
-    ) -> Result<Db<'a>, Error> {
-        match tx {
-            Some(tx) => self.tx_db(tx, key),
-            None => self.db(key),
-        }
     }
 
     /// The one shard all `models` are on: Java's `effectiveShard(Collection)`, which refuses
@@ -299,6 +238,265 @@ pub trait Repository: Send + Sync {
         }
         Ok(first.unwrap_or_else(|| self.registry().default_shard()))
     }
+}
+
+/// Every repository's selectors and ready-made methods, with Java's SQL: Java's
+/// `AbstractRepository` methods. Implemented for every `AbstractRepository`; the async twin is
+/// `AsyncRepository`. A module that imports both traits must say which one it means.
+pub trait Repository: AbstractRepository {
+    // ---- The database selectors, for code that is not async (the async ones are on
+    // ---- `AsyncRepository`). Each takes a shard key: `DefaultShard`, a `ShardIdentifier`, or
+    // ---- an id, which covers Java's overloads.
+
+    /// The primary: for writes, and reads that must be current. Java's `db(...)`.
+    fn db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
+        AsyncRepository::db(self, key).map(Db::new)
+    }
+
+    /// Every shard's primary; only the default shard's under `NoSharding`. Java's `dbs()`.
+    fn dbs(&self) -> Dbs<'_> {
+        Dbs::new(AsyncRepository::dbs(self))
+    }
+
+    /// The replica: for reads that may lag. Java's `readonlyDb(...)`.
+    fn readonly_db(&self, key: impl ShardKey) -> Result<Db<'_>, Error> {
+        AsyncRepository::readonly_db(self, key).map(Db::new)
+    }
+
+    /// Every shard's replica. Java's `readonlyDbs()`.
+    fn readonly_dbs(&self) -> Dbs<'_> {
+        Dbs::new(AsyncRepository::readonly_dbs(self))
+    }
+
+    /// The caller's transaction, refused if it is on another shard than the key.
+    fn tx_db<'a>(&'a self, tx: &'a mut Transaction, key: impl ShardKey) -> Result<Db<'a>, Error> {
+        AsyncRepository::tx_db(self, tx.as_async(), key).map(Db::new)
+    }
+
+    /// The caller's transaction if given one, else the primary.
+    fn tx_db_else_db<'a>(
+        &'a self,
+        tx: Option<&'a mut Transaction>,
+        key: impl ShardKey,
+    ) -> Result<Db<'a>, Error> {
+        AsyncRepository::tx_db_else_db(self, tx.map(Transaction::as_async), key).map(Db::new)
+    }
+
+    fn add(
+        &self,
+        tx: Option<&mut Transaction>,
+        model: &Self::Persistable,
+    ) -> Result<Self::Persistable, Error> {
+        block_on(AsyncRepository::add(
+            self,
+            tx.map(Transaction::as_async),
+            model,
+        ))
+    }
+
+    fn add_no_result(
+        &self,
+        tx: Option<&mut Transaction>,
+        model: &Self::Persistable,
+    ) -> Result<(), Error> {
+        block_on(AsyncRepository::add_no_result(
+            self,
+            tx.map(Transaction::as_async),
+            model,
+        ))
+    }
+
+    fn add_all(
+        &self,
+        tx: Option<&mut Transaction>,
+        models: &[Self::Persistable],
+    ) -> Result<Vec<Self::Persistable>, Error> {
+        block_on(AsyncRepository::add_all(
+            self,
+            tx.map(Transaction::as_async),
+            models,
+        ))
+    }
+
+    fn add_all_no_result(
+        &self,
+        tx: Option<&mut Transaction>,
+        models: &[Self::Persistable],
+    ) -> Result<(), Error> {
+        block_on(AsyncRepository::add_all_no_result(
+            self,
+            tx.map(Transaction::as_async),
+            models,
+        ))
+    }
+
+    fn update(
+        &self,
+        tx: Option<&mut Transaction>,
+        model: &Self::Persistable,
+    ) -> Result<Self::Persistable, Error> {
+        block_on(AsyncRepository::update(
+            self,
+            tx.map(Transaction::as_async),
+            model,
+        ))
+    }
+
+    fn update_no_result(
+        &self,
+        tx: Option<&mut Transaction>,
+        model: &Self::Persistable,
+    ) -> Result<(), Error> {
+        block_on(AsyncRepository::update_no_result(
+            self,
+            tx.map(Transaction::as_async),
+            model,
+        ))
+    }
+
+    fn update_all(
+        &self,
+        tx: Option<&mut Transaction>,
+        models: &[Self::Persistable],
+    ) -> Result<Vec<Self::Persistable>, Error> {
+        block_on(AsyncRepository::update_all(
+            self,
+            tx.map(Transaction::as_async),
+            models,
+        ))
+    }
+
+    fn update_all_no_result(
+        &self,
+        tx: Option<&mut Transaction>,
+        models: &[Self::Persistable],
+    ) -> Result<(), Error> {
+        block_on(AsyncRepository::update_all_no_result(
+            self,
+            tx.map(Transaction::as_async),
+            models,
+        ))
+    }
+
+    fn find_by_id(&self, id: &IdOf<Self>) -> Result<Option<Self::Persistable>, Error> {
+        block_on(AsyncRepository::find_by_id(self, id))
+    }
+
+    fn get_by_id(&self, id: &IdOf<Self>) -> Result<Self::Persistable, Error> {
+        block_on(AsyncRepository::get_by_id(self, id))
+    }
+
+    fn find_all_by_ids(&self, ids: &[IdOf<Self>]) -> Result<Vec<Self::Persistable>, Error> {
+        block_on(AsyncRepository::find_all_by_ids(self, ids))
+    }
+
+    fn find_all(&self) -> Result<Vec<Self::Persistable>, Error> {
+        block_on(AsyncRepository::find_all(self))
+    }
+
+    fn exists_by_id(&self, id: &IdOf<Self>) -> Result<bool, Error> {
+        block_on(AsyncRepository::exists_by_id(self, id))
+    }
+
+    fn count(&self) -> Result<i64, Error> {
+        block_on(AsyncRepository::count(self))
+    }
+
+    fn count_where(&self, condition: Condition) -> Result<i64, Error> {
+        block_on(AsyncRepository::count_where(self, condition))
+    }
+
+    fn find_one_where(&self, condition: Condition) -> Result<Option<Self::Persistable>, Error> {
+        block_on(AsyncRepository::find_one_where(self, condition))
+    }
+
+    fn find_all_where(&self, condition: Condition) -> Result<Vec<Self::Persistable>, Error> {
+        block_on(AsyncRepository::find_all_where(self, condition))
+    }
+
+    fn exists_where(&self, condition: Condition) -> Result<bool, Error> {
+        block_on(AsyncRepository::exists_where(self, condition))
+    }
+}
+
+/// Every repository's async selectors and ready-made methods, waited on with `.await`: the
+/// async twin of `Repository` (Python's `AsyncRepository`), with the same SQL. Implemented for
+/// every `AbstractRepository`; a module that imports both traits must say which one it means.
+pub trait AsyncRepository: AbstractRepository {
+    // ---- The database selectors. Each takes a shard key: `DefaultShard`, a `ShardIdentifier`,
+    // ---- or an id, which covers Java's overloads.
+
+    /// The primary: for writes, and reads that must be current. Java's `db(...)`.
+    fn db(&self, key: impl ShardKey) -> Result<AsyncDb<'_>, Error> {
+        self.registry()
+            .as_async()
+            .primary(self.effective_shard(key)?)
+    }
+
+    /// Every shard's primary; only the default shard's under `NoSharding`. Java's `dbs()`.
+    fn dbs(&self) -> AsyncDbs<'_> {
+        let registry = self.registry().as_async();
+        match self.sharding_strategy() {
+            ShardingStrategy::NoSharding => AsyncDbs(
+                registry
+                    .primary(registry.default_shard())
+                    .into_iter()
+                    .collect(),
+            ),
+            ShardingStrategy::EmbeddedBits => registry.primaries(),
+        }
+    }
+
+    /// The replica: for reads that may lag. Java's `readonlyDb(...)`.
+    fn readonly_db(&self, key: impl ShardKey) -> Result<AsyncDb<'_>, Error> {
+        self.registry()
+            .as_async()
+            .secondary(self.effective_shard(key)?)
+    }
+
+    /// Every shard's replica; only the default shard's under `NoSharding`. Java's
+    /// `readonlyDbs()`.
+    fn readonly_dbs(&self) -> AsyncDbs<'_> {
+        let registry = self.registry().as_async();
+        match self.sharding_strategy() {
+            ShardingStrategy::NoSharding => AsyncDbs(
+                registry
+                    .secondary(registry.default_shard())
+                    .into_iter()
+                    .collect(),
+            ),
+            ShardingStrategy::EmbeddedBits => registry.secondaries(),
+        }
+    }
+
+    /// The caller's transaction, refused if it is on another shard than the key. Java's
+    /// `txDb(...)`, which returns an empty `Optional` instead.
+    fn tx_db<'a>(
+        &'a self,
+        tx: &'a mut AsyncTransaction,
+        key: impl ShardKey,
+    ) -> Result<AsyncDb<'a>, Error> {
+        let shard = self.effective_shard(key)?;
+        if tx.shard() != shard {
+            return Err(Error::WrongShard {
+                transaction: tx.shard(),
+                row: shard,
+            });
+        }
+        Ok(tx.db())
+    }
+
+    /// The caller's transaction if given one, else the primary. Java's `txDbElseDb(...)`.
+    fn tx_db_else_db<'a>(
+        &'a self,
+        tx: Option<&'a mut AsyncTransaction>,
+        key: impl ShardKey,
+    ) -> Result<AsyncDb<'a>, Error> {
+        match tx {
+            Some(tx) => AsyncRepository::tx_db(self, tx, key),
+            None => AsyncRepository::db(self, key),
+        }
+    }
 
     // ---- Writes. Each joins `tx` when given one, as Java's do through `txDbElseDb`.
 
@@ -306,12 +504,12 @@ pub trait Repository: Send + Sync {
     /// no `RETURNING`, the model as given. Java's `add`.
     fn add(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         model: &Self::Persistable,
     ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
             let insert = insert_of(&[Self::to_record(model)]);
-            let mut db = self.tx_db_else_db(tx, model.id())?;
+            let mut db = AsyncRepository::tx_db_else_db(self, tx, model.id())?;
             if db.dialect() == Dialect::MySql {
                 db.execute(&insert).await?;
                 return Ok(model.clone());
@@ -331,12 +529,14 @@ pub trait Repository: Send + Sync {
     /// INSERT, giving back nothing. Java's `addNoResult`.
     fn add_no_result(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         model: &Self::Persistable,
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             let insert = insert_of(&[Self::to_record(model)]);
-            self.tx_db_else_db(tx, model.id())?.execute(&insert).await?;
+            AsyncRepository::tx_db_else_db(self, tx, model.id())?
+                .execute(&insert)
+                .await?;
             Ok(())
         }
     }
@@ -344,19 +544,19 @@ pub trait Repository: Send + Sync {
     /// One multi-row INSERT for every model, all on one shard. Java's `addAll`.
     fn add_all(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         models: &[Self::Persistable],
     ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             match models {
                 [] => return Ok(Vec::new()),
-                [model] => return Ok(vec![self.add(tx, model).await?]),
+                [model] => return Ok(vec![AsyncRepository::add(self, tx, model).await?]),
                 _ => {}
             }
             let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
             let shard = self.shard_of_all(models)?;
             let insert = insert_of(&records);
-            let mut db = self.tx_db_else_db(tx, shard)?;
+            let mut db = AsyncRepository::tx_db_else_db(self, tx, shard)?;
             if db.dialect() == Dialect::MySql {
                 db.execute(&insert).await?;
                 return Ok(models.to_vec());
@@ -377,7 +577,7 @@ pub trait Repository: Send + Sync {
     /// One multi-row INSERT, giving back nothing. Java's `addAllNoResult`.
     fn add_all_no_result(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         models: &[Self::Persistable],
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
@@ -386,7 +586,7 @@ pub trait Repository: Send + Sync {
             }
             let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
             let shard = self.shard_of_all(models)?;
-            self.tx_db_else_db(tx, shard)?
+            AsyncRepository::tx_db_else_db(self, tx, shard)?
                 .execute(&insert_of(&records))
                 .await?;
             Ok(())
@@ -399,7 +599,7 @@ pub trait Repository: Send + Sync {
     /// Java's `update`.
     fn update(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         model: &Self::Persistable,
     ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
@@ -409,7 +609,7 @@ pub trait Repository: Send + Sync {
                 version: model.version(),
             };
             let update = update_of(&Self::to_record(model), model.id().uuid(), model.version());
-            let mut db = self.tx_db_else_db(tx, model.id())?;
+            let mut db = AsyncRepository::tx_db_else_db(self, tx, model.id())?;
             if db.dialect() == Dialect::Postgres {
                 let returned = db
                     .fetch_optional::<Self::Record, _>(&update.clone().returning_all().to_owned())
@@ -426,12 +626,14 @@ pub trait Repository: Send + Sync {
     /// UPDATE with the version check, giving back nothing. Java's `updateNoResult`.
     fn update_no_result(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         model: &Self::Persistable,
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             let update = update_of(&Self::to_record(model), model.id().uuid(), model.version());
-            let affected = self.tx_db_else_db(tx, model.id())?.execute(&update).await?;
+            let affected = AsyncRepository::tx_db_else_db(self, tx, model.id())?
+                .execute(&update)
+                .await?;
             match affected {
                 1 => Ok(()),
                 0 => Err(Error::StaleRecord {
@@ -451,13 +653,13 @@ pub trait Repository: Send + Sync {
     /// first. Java's `updateAll`.
     fn update_all(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         models: &[Self::Persistable],
     ) -> impl Future<Output = Result<Vec<Self::Persistable>, Error>> + Send {
         async move {
             match models {
                 [] => return Ok(Vec::new()),
-                [model] => return Ok(vec![self.update(tx, model).await?]),
+                [model] => return Ok(vec![AsyncRepository::update(self, tx, model).await?]),
                 _ => {}
             }
             let stale = |updated: usize| Error::StaleRecords {
@@ -467,7 +669,7 @@ pub trait Repository: Send + Sync {
             };
             let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
             let shard = self.shard_of_all(models)?;
-            let mut db = self.tx_db_else_db(tx, shard)?;
+            let mut db = AsyncRepository::tx_db_else_db(self, tx, shard)?;
             let (sql, values) = update_all_sql(db.dialect(), &records);
             if db.dialect() == Dialect::Postgres {
                 let returned = db.fetch_all_sql::<Self::Record>(sql, values).await?;
@@ -487,18 +689,18 @@ pub trait Repository: Send + Sync {
     /// One UPDATE for every model, giving back nothing. Java's `updateAllNoResult`.
     fn update_all_no_result(
         &self,
-        tx: Option<&mut Transaction>,
+        tx: Option<&mut AsyncTransaction>,
         models: &[Self::Persistable],
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             match models {
                 [] => return Ok(()),
-                [model] => return self.update_no_result(tx, model).await,
+                [model] => return AsyncRepository::update_no_result(self, tx, model).await,
                 _ => {}
             }
             let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
             let shard = self.shard_of_all(models)?;
-            let mut db = self.tx_db_else_db(tx, shard)?;
+            let mut db = AsyncRepository::tx_db_else_db(self, tx, shard)?;
             let (mut sql, values) = update_all_sql(db.dialect(), &records);
             if db.dialect() == Dialect::Postgres {
                 let returning = sql.rfind(" RETURNING ").expect("written above");
@@ -529,8 +731,7 @@ pub trait Repository: Send + Sync {
                 .and_where(Expr::col(TableOf::<Self>::ID).eq(id.uuid()))
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
-            let record = self
-                .db(id)?
+            let record = AsyncRepository::db(self, id)?
                 .fetch_optional::<Self::Record, _>(&select)
                 .await?;
             record.map(Self::from_record).transpose()
@@ -543,10 +744,12 @@ pub trait Repository: Send + Sync {
         id: &IdOf<Self>,
     ) -> impl Future<Output = Result<Self::Persistable, Error>> + Send {
         async move {
-            self.find_by_id(id).await?.ok_or_else(|| Error::NotFound {
-                table: TableOf::<Self>::TABLE.to_string(),
-                id: id.uuid().to_string(),
-            })
+            AsyncRepository::find_by_id(self, id)
+                .await?
+                .ok_or_else(|| Error::NotFound {
+                    table: TableOf::<Self>::TABLE.to_string(),
+                    id: id.uuid().to_string(),
+                })
         }
     }
 
@@ -571,7 +774,7 @@ pub trait Repository: Send + Sync {
             }
             let mut models = Vec::new();
             for (shard, uuids) in by_shard {
-                let mut db = self.db(shard)?;
+                let mut db = AsyncRepository::db(self, shard)?;
                 let id = Expr::col(TableOf::<Self>::ID);
                 let matches = match db.dialect() {
                     Dialect::Postgres => {
@@ -602,7 +805,7 @@ pub trait Repository: Send + Sync {
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
             let mut models = Vec::new();
-            for mut db in self.dbs().into_vec() {
+            for mut db in AsyncRepository::dbs(self).into_vec() {
                 for record in db.fetch_all::<Self::Record, _>(&select).await? {
                     models.push(Self::from_record(record)?);
                 }
@@ -618,13 +821,13 @@ pub trait Repository: Send + Sync {
                 .and_where(Expr::col(TableOf::<Self>::ID).eq(id.uuid()))
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
-            self.db(id)?.fetch_exists(&select).await
+            AsyncRepository::db(self, id)?.fetch_exists(&select).await
         }
     }
 
     /// Rows on every shard, added up. Java's `count`.
     fn count(&self) -> impl Future<Output = Result<i64, Error>> + Send {
-        self.count_where(Condition::all())
+        AsyncRepository::count_where(self, Condition::all())
     }
 
     /// Matching rows on every shard, added up. Java's `countWhere`.
@@ -635,7 +838,7 @@ pub trait Repository: Send + Sync {
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
             let mut total = 0;
-            for mut db in self.dbs().into_vec() {
+            for mut db in AsyncRepository::dbs(self).into_vec() {
                 total += db.fetch_scalar::<i64>(&count).await?;
             }
             Ok(total)
@@ -653,7 +856,7 @@ pub trait Repository: Send + Sync {
                 .cond_where(condition)
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
-            for mut db in self.dbs().into_vec() {
+            for mut db in AsyncRepository::dbs(self).into_vec() {
                 let mut records = db.fetch_all::<Self::Record, _>(&select).await?;
                 if records.len() > 1 {
                     return Err(Error::TooManyRows {
@@ -679,7 +882,7 @@ pub trait Repository: Send + Sync {
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
             let mut models = Vec::new();
-            for mut db in self.dbs().into_vec() {
+            for mut db in AsyncRepository::dbs(self).into_vec() {
                 for record in db.fetch_all::<Self::Record, _>(&select).await? {
                     models.push(Self::from_record(record)?);
                 }
@@ -698,7 +901,7 @@ pub trait Repository: Send + Sync {
                 .cond_where(condition)
                 .and_where(not_deleted::<TableOf<Self>>())
                 .to_owned();
-            for mut db in self.dbs().into_vec() {
+            for mut db in AsyncRepository::dbs(self).into_vec() {
                 if db.fetch_exists(&select).await? {
                     return Ok(true);
                 }
@@ -707,3 +910,7 @@ pub trait Repository: Send + Sync {
         }
     }
 }
+
+impl<R: AbstractRepository + ?Sized> Repository for R {}
+
+impl<R: AbstractRepository + ?Sized> AsyncRepository for R {}

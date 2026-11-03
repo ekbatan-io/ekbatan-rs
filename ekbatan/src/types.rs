@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 /// A UUID column, read the way each database keeps it: Java's `UuidStringConverter`.
 /// PostgreSQL has a `uuid` type; MySQL keeps `CHAR(36)` text; MariaDB's own `UUID` type arrives
-/// as text. Writing needs no type of its own: `Db` sends UUIDs to MySQL and MariaDB as text.
+/// as text. Writing needs no type of its own: `AsyncDb` sends UUIDs to MySQL and MariaDB as text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DbUuid(pub Uuid);
 

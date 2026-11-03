@@ -4,8 +4,9 @@
 
 mod common;
 
+use ekbatan::aio::AsyncRepository;
 use ekbatan::migration::Migrator;
-use ekbatan::{DatabaseRegistry, Dialect, EkbatanConfig, Repository, ShardIdentifier};
+use ekbatan::{DatabaseRegistry, Dialect, EkbatanConfig, ShardIdentifier};
 use sea_query::{Expr, Query};
 use serde_json::json;
 use wallet_example::repository::WalletRepository;
@@ -89,7 +90,10 @@ async fn run(dialect: Dialect) {
     assert_eq!(wallets.count().await.unwrap(), 0);
 
     // The driver setting reached the session.
-    let mut db = registry.primary(ShardIdentifier::new(1, 0)).unwrap();
+    let mut db = registry
+        .as_async()
+        .primary(ShardIdentifier::new(1, 0))
+        .unwrap();
     let setting = match dialect {
         Dialect::Postgres => Query::select()
             .expr(Expr::cust("current_setting('application_name')"))

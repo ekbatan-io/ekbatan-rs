@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ekbatan::distributed_jobs::{DistributedJob, ExecutionContext, JobRegistry, Schedule};
+use ekbatan::distributed_jobs::{AsyncDistributedJob, ExecutionContext, JobRegistry, Schedule};
 use ekbatan::{ConnectionProvider, Dialect, Error, Instant};
 use sea_query::{Alias, Expr, ExprTrait, Query};
 
@@ -35,7 +35,7 @@ struct Tick {
     runs: Runs,
 }
 
-impl DistributedJob for Tick {
+impl AsyncDistributedJob for Tick {
     fn name(&self) -> String {
         "tick".to_owned()
     }
@@ -60,7 +60,7 @@ struct Named<F> {
     body: F,
 }
 
-impl<F, Fut> DistributedJob for Named<F>
+impl<F, Fut> AsyncDistributedJob for Named<F>
 where
     F: Fn(ExecutionContext) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send,

@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ekbatan::action::{
-    Action, ActionExecutor, ActionPlan, ActionRegistry, EventEntity, EventEntityRepository,
-    ExecutionConfiguration, RepositoryRegistry, RetryConfig, RetryOn,
+    ActionPlan, ActionRegistry, AsyncAction, AsyncActionExecutor, EventEntity,
+    EventEntityRepository, ExecutionConfiguration, RepositoryRegistry, RetryConfig, RetryOn,
 };
+use ekbatan::aio::AsyncRepository;
 use ekbatan::{
-    Clock, DatabaseRegistry, Dialect, Error, Model, Persistable, Repository, ShardIdentifier,
-    SystemClock,
+    Clock, DatabaseRegistry, Dialect, Error, Model, Persistable, ShardIdentifier, SystemClock,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -46,7 +46,7 @@ async fn on_mariadb() {
 struct App {
     registry: Arc<DatabaseRegistry>,
     wallets: Arc<WalletRepository>,
-    executor: ActionExecutor,
+    executor: AsyncActionExecutor,
     flaky_calls: Arc<AtomicU32>,
 }
 
@@ -74,7 +74,7 @@ fn app(registry: Arc<DatabaseRegistry>) -> App {
         .with_repository(wallets.clone())
         .with_repository(notifications)
         .build();
-    let executor = ActionExecutor::builder()
+    let executor = AsyncActionExecutor::builder()
         .namespace("io.example.wallet")
         .database_registry(registry.clone())
         .action_registry(actions)
@@ -348,7 +348,7 @@ async fn run(dialect: Dialect) {
     say("one row staged twice: refused");
 
     // Not registered: refused before anything runs.
-    let bare = ActionExecutor::builder()
+    let bare = AsyncActionExecutor::builder()
         .namespace("x")
         .database_registry(app.registry.clone())
         .action_registry(ActionRegistry::builder().build())
@@ -359,7 +359,7 @@ async fn run(dialect: Dialect) {
         .execute::<DoesNothing>(None, OwnerParams { owner_id: owner })
         .await;
     assert!(matches!(missing, Err(Error::Invalid(_))), "{missing:?}");
-    let hyphen = ActionExecutor::builder()
+    let hyphen = AsyncActionExecutor::builder()
         .namespace("my-service")
         .database_registry(app.registry.clone())
         .action_registry(ActionRegistry::builder().build())
@@ -370,7 +370,7 @@ async fn run(dialect: Dialect) {
 
     // The event log write fails: the wallet written before it in the same transaction is
     // rolled back with it.
-    let failing = ActionExecutor::builder()
+    let failing = AsyncActionExecutor::builder()
         .namespace("io.example.wallet")
         .database_registry(app.registry.clone())
         .action_registry(
@@ -415,7 +415,7 @@ struct FailingEventPersister;
 impl ekbatan::action::EventPersister for FailingEventPersister {
     fn persist_action_events<'a>(
         &'a self,
-        _tx: &'a mut ekbatan::Transaction,
+        _tx: &'a mut ekbatan::aio::AsyncTransaction,
         _namespace: &'a str,
         _action_name: &'a str,
         _started_date: ekbatan::Instant,
@@ -441,7 +441,7 @@ async fn events_where(
     shard: ShardIdentifier,
     keep: impl Fn(&EventEntity) -> bool,
 ) -> Vec<EventEntity> {
-    let mut db = registry.primary(shard).unwrap();
+    let mut db = registry.as_async().primary(shard).unwrap();
     EventEntityRepository::find_all(&mut db)
         .await
         .unwrap()
@@ -465,7 +465,7 @@ struct WalletParams {
 /// Opens one wallet on each shard.
 struct OpenOnBothShards;
 
-impl Action for OpenOnBothShards {
+impl AsyncAction for OpenOnBothShards {
     type Params = OwnerParams;
     type Result = Vec<ekbatan::ShardedId<Wallet>>;
 
@@ -488,7 +488,7 @@ struct StaleOnce {
     wallets: Arc<WalletRepository>,
 }
 
-impl Action for StaleOnce {
+impl AsyncAction for StaleOnce {
     type Params = WalletParams;
     type Result = Wallet;
 
@@ -532,7 +532,7 @@ struct FailsTwice {
     calls: Arc<AtomicU32>,
 }
 
-impl Action for FailsTwice {
+impl AsyncAction for FailsTwice {
     type Params = OwnerParams;
     type Result = ();
 
@@ -551,7 +551,7 @@ impl Action for FailsTwice {
 
 struct DoesNothing;
 
-impl Action for DoesNothing {
+impl AsyncAction for DoesNothing {
     type Params = OwnerParams;
     type Result = ();
 
@@ -567,7 +567,7 @@ impl Action for DoesNothing {
 
 struct StagesTwice;
 
-impl Action for StagesTwice {
+impl AsyncAction for StagesTwice {
     type Params = OwnerParams;
     type Result = ();
 

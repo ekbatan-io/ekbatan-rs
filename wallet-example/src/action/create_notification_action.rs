@@ -1,5 +1,6 @@
 use ekbatan::Error;
-use ekbatan::action::{Action, ActionPlan};
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::AsyncAction;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -19,7 +20,7 @@ pub struct Params {
 #[derive(Default)]
 pub struct CreateNotificationAction;
 
-impl Action for CreateNotificationAction {
+impl AsyncAction for CreateNotificationAction {
     type Params = Params;
     type Result = Notification;
 

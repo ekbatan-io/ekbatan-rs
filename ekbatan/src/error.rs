@@ -53,19 +53,19 @@ pub enum Error {
     Json(serde_json::Error),
     /// An action's own failure: what a Java action throws. Carries the app's error, which
     /// `ExecutionConfiguration` can retry by type.
-    Action(Box<dyn std::error::Error + Send + Sync>),
+    AsyncAction(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl Error {
     /// Wraps an app's own error as an action failure: `Err(Error::action(InsufficientFunds))`.
     pub fn action(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Error::Action(Box::new(error))
+        Error::AsyncAction(Box::new(error))
     }
 
-    /// The app's error inside `Error::Action`, if it is an `E`.
+    /// The app's error inside `Error::AsyncAction`, if it is an `E`.
     pub fn action_error<E: std::error::Error + 'static>(&self) -> Option<&E> {
         match self {
-            Error::Action(error) => error.downcast_ref::<E>(),
+            Error::AsyncAction(error) => error.downcast_ref::<E>(),
             _ => None,
         }
     }
@@ -123,7 +123,7 @@ impl fmt::Display for Error {
             Error::Migration { target, source } => {
                 write!(f, "migrating {target} failed: {source}")
             }
-            Error::Action(error) => write!(f, "{error}"),
+            Error::AsyncAction(error) => write!(f, "{error}"),
         }
     }
 }
@@ -134,7 +134,7 @@ impl std::error::Error for Error {
             Error::Database(error) => Some(error),
             Error::Json(error) => Some(error),
             Error::Migration { source, .. } => Some(source),
-            Error::Action(error) => Some(&**error),
+            Error::AsyncAction(error) => Some(&**error),
             _ => None,
         }
     }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use ekbatan::keyed_lock::{KeyedLockProvider, SqlKeyedLockProvider};
+use ekbatan::keyed_lock::{AsyncKeyedLockProvider, SqlKeyedLockProvider};
 use ekbatan::{ConnectionProvider, Dialect};
 
 use common::{GLOBAL, start};

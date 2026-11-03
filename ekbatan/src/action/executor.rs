@@ -11,21 +11,21 @@ use super::config::ExecutionConfiguration;
 use super::event_persister::{EmittedEvent, EventPersister, SingleTableJsonEventPersister};
 use super::plan::{ActionPlan, AnyChanges};
 use super::repository_registry::RepositoryRegistry;
-use super::{Action, ActionRegistry, action_name};
+use super::{ActionRegistry, AsyncAction, action_name};
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 type ShardChanges = Vec<(TypeId, Box<dyn AnyChanges>)>;
 
 /// Runs actions: Java's `ActionExecutor`, the framework's entry point.
 ///
-/// Each call makes a fresh `ActionPlan`, runs `Action::perform` on it, groups what it staged by
+/// Each call makes a fresh `ActionPlan`, runs `AsyncAction::perform` on it, groups what it staged by
 /// shard (each repository's `ShardingStrategy`), and writes each shard's rows and its
 /// `eventlog.events` rows in one transaction, so the event log always matches the data.
 ///
 /// An action touching two shards is refused (`Error::CrossShard`) unless the configuration
 /// allows it; then each shard commits on its own (no two-phase commit). A failure the
 /// configuration retries starts again from a new plan.
-pub struct ActionExecutor {
+pub struct AsyncActionExecutor {
     namespace: String,
     database_registry: Arc<DatabaseRegistry>,
     action_registry: ActionRegistry,
@@ -36,9 +36,9 @@ pub struct ActionExecutor {
     default_execution_configuration: ExecutionConfiguration,
 }
 
-impl ActionExecutor {
-    pub fn builder() -> ActionExecutorBuilder {
-        ActionExecutorBuilder::default()
+impl AsyncActionExecutor {
+    pub fn builder() -> AsyncActionExecutorBuilder {
+        AsyncActionExecutorBuilder::default()
     }
 
     pub fn namespace(&self) -> &str {
@@ -46,7 +46,7 @@ impl ActionExecutor {
     }
 
     /// Runs `A` with the executor's default `ExecutionConfiguration`.
-    pub async fn execute<A: Action>(
+    pub async fn execute<A: AsyncAction>(
         &self,
         principal: Option<&str>,
         params: A::Params,
@@ -56,7 +56,7 @@ impl ActionExecutor {
     }
 
     /// Runs `A` with a configuration for this call only.
-    pub async fn execute_with<A: Action>(
+    pub async fn execute_with<A: AsyncAction>(
         &self,
         principal: Option<&str>,
         params: A::Params,
@@ -101,7 +101,7 @@ impl ActionExecutor {
         }
     }
 
-    async fn attempt<A: Action>(
+    async fn attempt<A: AsyncAction>(
         &self,
         action: &A,
         name: &'static str,
@@ -201,7 +201,7 @@ impl ActionExecutor {
         action_event_id: Uuid,
     ) -> Result<(), Error> {
         let transaction_manager = self.database_registry.transaction_manager(shard)?;
-        let mut tx = transaction_manager.begin().await?;
+        let mut tx = transaction_manager.as_async().begin().await?;
         let written = async {
             let action_completion_date = self.clock.instant();
             let additions: usize = changes.iter().map(|(_, c)| c.addition_count()).sum();
@@ -326,7 +326,7 @@ fn require_valid_namespace(namespace: Option<String>) -> Result<String, Error> {
 
 /// Java's `ActionExecutor.Builder`.
 #[derive(Default)]
-pub struct ActionExecutorBuilder {
+pub struct AsyncActionExecutorBuilder {
     namespace: Option<String>,
     database_registry: Option<Arc<DatabaseRegistry>>,
     action_registry: Option<ActionRegistry>,
@@ -336,7 +336,7 @@ pub struct ActionExecutorBuilder {
     default_execution_configuration: Option<ExecutionConfiguration>,
 }
 
-impl ActionExecutorBuilder {
+impl AsyncActionExecutorBuilder {
     /// Recorded on every event row. Required.
     pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
         self.namespace = Some(namespace.into());
@@ -378,9 +378,9 @@ impl ActionExecutorBuilder {
         self
     }
 
-    pub fn build(self) -> Result<ActionExecutor, Error> {
+    pub fn build(self) -> Result<AsyncActionExecutor, Error> {
         let required = |what: &str| Error::Invalid(format!("{what} is required"));
-        Ok(ActionExecutor {
+        Ok(AsyncActionExecutor {
             namespace: require_valid_namespace(self.namespace)?,
             database_registry: self
                 .database_registry

@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::TimeDelta;
-use ekbatan::action::{ActionExecutor, ActionRegistry, RepositoryRegistry};
+use ekbatan::action::{ActionRegistry, AsyncActionExecutor, RepositoryRegistry};
 use ekbatan::distributed_jobs::JobRegistry;
 use ekbatan::local_event_handler::{
-    EventEnvelope, EventFanoutJob, EventHandler, EventHandlerRegistry, EventHandlingJob,
+    AsyncEventHandler, EventEnvelope, EventFanoutJob, EventHandlerRegistry, EventHandlingJob,
     EventNotification, EventNotificationRepository, EventNotificationState,
 };
 use ekbatan::{
@@ -54,7 +54,7 @@ struct Recorder {
     seen: Seen,
 }
 
-impl EventHandler for Recorder {
+impl AsyncEventHandler for Recorder {
     type Event = WalletMoneyDepositedEvent;
 
     fn name(&self) -> String {
@@ -80,7 +80,7 @@ struct FailsOnce {
     calls: Arc<Mutex<u32>>,
 }
 
-impl EventHandler for FailsOnce {
+impl AsyncEventHandler for FailsOnce {
     type Event = WalletCreatedEvent;
 
     fn name(&self) -> String {
@@ -100,7 +100,7 @@ impl EventHandler for FailsOnce {
 /// Always fails.
 struct AlwaysFails;
 
-impl EventHandler for AlwaysFails {
+impl AsyncEventHandler for AlwaysFails {
     type Event = WalletClosedEvent;
 
     fn name(&self) -> String {
@@ -120,7 +120,7 @@ async fn notifications(
     registry: &DatabaseRegistry,
     shard: ShardIdentifier,
 ) -> Vec<EventNotification> {
-    let mut db = registry.primary(shard).unwrap();
+    let mut db = registry.as_async().primary(shard).unwrap();
     EventNotificationRepository::find_all(&mut db)
         .await
         .unwrap()
@@ -135,7 +135,7 @@ async fn run(dialect: Dialect) {
     let registry = cluster.registry().await;
     let say = |what: &str| println!("[{dialect:?}] {what}");
     let wallets = Arc::new(WalletRepository::new(registry.clone()));
-    let executor = ActionExecutor::builder()
+    let executor = AsyncActionExecutor::builder()
         .namespace("io.example.wallet")
         .database_registry(registry.clone())
         .action_registry(

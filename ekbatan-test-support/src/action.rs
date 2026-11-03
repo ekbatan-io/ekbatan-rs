@@ -1,21 +1,22 @@
-//! Java's `ActionSpec` and `ActionAssert`: run an action's `perform` on a fresh plan, with no
+//! `AsyncActionSpec` (the async twin of Java's `ActionSpec`) and `ActionAssert`: run an action's `perform` on a fresh plan, with no
 //! database, and check what it staged and emitted.
 
 use std::any::Any;
 
-use ekbatan::action::{Action, ActionPlan};
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::AsyncAction;
 use ekbatan::{AnyModelEvent, Error, Persistable};
 
-/// Runs one action in a test: Java's `ActionSpec`. Nothing is written; `execute` hands back an
+/// Runs one async action in a test, as Java's `ActionSpec`. Nothing is written; `execute` hands back an
 /// `ActionAssert` over the result and the plan.
-pub struct ActionSpec<'a, A: Action> {
+pub struct AsyncActionSpec<'a, A: AsyncAction> {
     action: &'a A,
     principal: Option<String>,
 }
 
-impl<'a, A: Action> ActionSpec<'a, A> {
+impl<'a, A: AsyncAction> AsyncActionSpec<'a, A> {
     pub fn of(action: &'a A) -> Self {
-        ActionSpec {
+        AsyncActionSpec {
             action,
             principal: None,
         }
@@ -82,6 +83,10 @@ fn simple_name<T: ?Sized>() -> &'static str {
 }
 
 impl<R> ActionAssert<R> {
+    pub(crate) fn new(result: R, plan: ActionPlan) -> Self {
+        ActionAssert { result, plan }
+    }
+
     // ---- Additions
 
     /// Exactly one `E` was staged for insert; `verifier` checks it.

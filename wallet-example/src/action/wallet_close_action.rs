@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use ekbatan::action::{Action, ActionPlan};
-use ekbatan::{Error, Repository, ShardedId};
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::AsyncAction;
+use ekbatan::aio::AsyncRepository;
+use ekbatan::{Error, ShardedId};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Wallet;
@@ -24,7 +26,7 @@ impl WalletCloseAction {
     }
 }
 
-impl Action for WalletCloseAction {
+impl AsyncAction for WalletCloseAction {
     type Params = Params;
     type Result = Wallet;
 

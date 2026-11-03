@@ -19,6 +19,10 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
     `scheduled_tasks` (db-scheduler's design, our code).
   - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
     `eventlog.event_notifications`.
+  - `sync_api/` the sync API under the plain names (`Action`, `ActionExecutor`, `Repository`,
+    `Db`, `Transaction`, locks, jobs, handlers), waiting on the async engine on its own tokio
+    runtime; `block_on` for the rest.
+  - `aio.rs` the async twins, `Async*` (Python's `ekbatan.aio`).
   - `keyed_lock.rs` `KeyedLockProvider`: in-process and database keyed locks.
   - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
   - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.

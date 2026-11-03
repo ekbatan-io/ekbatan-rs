@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{AnyModelEvent, Error, ModelId, Persistable};
 
 /// What one action execution means to write: Java's `ActionPlan`. Created fresh for each
-/// execution (and each retry) and handed to `Action::perform`. Java binds it in a `ScopedValue`
+/// execution (and each retry) and handed to `AsyncAction::perform`. Java binds it in a `ScopedValue`
 /// and the action reaches it through `plan()`; Rust has no such thing, so it is a parameter.
 #[derive(Default)]
 pub struct ActionPlan {

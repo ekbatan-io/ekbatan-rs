@@ -7,7 +7,8 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 
 use crate::action::plan::{AnyChanges, PersistableChanges};
-use crate::{Error, Persistable, Repository, ShardIdentifier, Transaction};
+use crate::aio::AsyncRepository;
+use crate::{AbstractRepository, AsyncTransaction, Error, Persistable, ShardIdentifier};
 
 /// Which repository writes each type an action can stage: Java's `RepositoryRegistry`.
 #[derive(Clone, Default)]
@@ -40,7 +41,7 @@ pub struct RepositoryRegistryBuilder {
 impl RepositoryRegistryBuilder {
     /// Registers `repository` as the writer of its persistable type: Java's
     /// `withModelRepository(Wallet.class, walletRepository)` (and `withEntityRepository`).
-    pub fn with_repository<R: Repository + 'static>(mut self, repository: Arc<R>) -> Self {
+    pub fn with_repository<R: AbstractRepository + 'static>(mut self, repository: Arc<R>) -> Self {
         self.repositories
             .insert(TypeId::of::<R::Persistable>(), Arc::new(Erased(repository)));
         self
@@ -66,14 +67,14 @@ pub trait AnyRepository: Send + Sync {
     /// additions, then `updateAllNoResult` for the updates.
     fn persist<'a>(
         &'a self,
-        tx: &'a mut Transaction,
+        tx: &'a mut AsyncTransaction,
         changes: &'a dyn AnyChanges,
     ) -> BoxFuture<'a, Result<(), Error>>;
 }
 
 struct Erased<R>(Arc<R>);
 
-impl<R: Repository + 'static> AnyRepository for Erased<R> {
+impl<R: AbstractRepository + 'static> AnyRepository for Erased<R> {
     fn group_by_shard(&self, changes: &dyn AnyChanges) -> Result<ChangesByShard, Error> {
         let changes = downcast::<R::Persistable>(changes)?;
         let mut by_shard = Vec::new();
@@ -93,19 +94,17 @@ impl<R: Repository + 'static> AnyRepository for Erased<R> {
 
     fn persist<'a>(
         &'a self,
-        tx: &'a mut Transaction,
+        tx: &'a mut AsyncTransaction,
         changes: &'a dyn AnyChanges,
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let changes = downcast::<R::Persistable>(changes)?;
             if !changes.additions.is_empty() {
-                self.0
-                    .add_all_no_result(Some(&mut *tx), &changes.additions)
+                AsyncRepository::add_all_no_result(&*self.0, Some(&mut *tx), &changes.additions)
                     .await?;
             }
             if !changes.updates.is_empty() {
-                self.0
-                    .update_all_no_result(Some(&mut *tx), &changes.updates)
+                AsyncRepository::update_all_no_result(&*self.0, Some(&mut *tx), &changes.updates)
                     .await?;
             }
             Ok(())

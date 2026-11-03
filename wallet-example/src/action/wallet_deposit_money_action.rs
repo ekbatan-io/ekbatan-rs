@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use ekbatan::action::{Action, ActionPlan};
-use ekbatan::{Error, Repository, ShardedId};
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::AsyncAction;
+use ekbatan::aio::AsyncRepository;
+use ekbatan::{Error, ShardedId};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +29,7 @@ impl WalletDepositMoneyAction {
     }
 }
 
-impl Action for WalletDepositMoneyAction {
+impl AsyncAction for WalletDepositMoneyAction {
     type Params = Params;
     type Result = Wallet;
 

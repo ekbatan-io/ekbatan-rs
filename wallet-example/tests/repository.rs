@@ -1,9 +1,8 @@
 //! The wallet repository on real databases: PostgreSQL, MySQL and MariaDB, two shards each.
 //! The same scenario runs on all three.
 
-use ekbatan::{
-    Clock, Dialect, Entity, Error, Model, Persistable, Repository, ShardIdentifier, SystemClock,
-};
+use ekbatan::aio::AsyncRepository;
+use ekbatan::{Clock, Dialect, Entity, Error, Model, Persistable, ShardIdentifier, SystemClock};
 use rust_decimal::Decimal;
 use sea_query::{Asterisk, Cond, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query};
 use uuid::Uuid;
@@ -107,6 +106,7 @@ async fn run_scenario(cluster: &common::Cluster) {
     let mexico_tm = registry.transaction_manager(MEXICO).unwrap();
     let extra = open(MEXICO, owner, "MXN", Decimal::ZERO);
     let failed = mexico_tm
+        .as_async()
         .in_transaction(async |tx| {
             wallets.add(Some(tx), &extra).await?;
             wallets.mark_all_settled(Some(tx), &[*mexico.id()]).await?;
@@ -120,6 +120,7 @@ async fn run_scenario(cluster: &common::Cluster) {
         WalletState::Opened
     );
     mexico_tm
+        .as_async()
         .in_transaction(async |tx| {
             wallets.add(Some(tx), &extra).await?;
             wallets.mark_all_settled(Some(tx), &[*mexico.id()]).await?;
@@ -138,6 +139,7 @@ async fn run_scenario(cluster: &common::Cluster) {
     let wrong = registry
         .transaction_manager(GLOBAL)
         .unwrap()
+        .as_async()
         .in_transaction(async |tx| wallets.mark_all_settled(Some(tx), &[*extra.id()]).await)
         .await;
     assert!(matches!(wrong, Err(Error::WrongShard { .. })), "{wrong:?}");

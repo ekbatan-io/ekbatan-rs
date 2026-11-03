@@ -9,8 +9,8 @@ use futures_util::future::BoxFuture;
 use sea_query::{Alias, Asterisk, Expr, ExprTrait, IntoIden, Query, SimpleExpr};
 use uuid::Uuid;
 
-use crate::db::Db;
-use crate::{AnyModelEvent, DbUuid, Dialect, Error, Instant, ShardIdentifier, Transaction};
+use crate::db::AsyncDb;
+use crate::{AnyModelEvent, AsyncTransaction, DbUuid, Dialect, Error, Instant, ShardIdentifier};
 
 /// One event as the event log receives it: the event and the model it belongs to.
 #[derive(Clone, Copy, Debug)]
@@ -28,7 +28,7 @@ pub trait EventPersister: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn persist_action_events<'a>(
         &'a self,
-        tx: &'a mut Transaction,
+        tx: &'a mut AsyncTransaction,
         namespace: &'a str,
         action_name: &'a str,
         started_date: Instant,
@@ -75,7 +75,7 @@ impl SingleTableJsonEventPersister {
 impl EventPersister for SingleTableJsonEventPersister {
     fn persist_action_events<'a>(
         &'a self,
-        tx: &'a mut Transaction,
+        tx: &'a mut AsyncTransaction,
         namespace: &'a str,
         action_name: &'a str,
         started_date: Instant,
@@ -248,7 +248,10 @@ pub(crate) fn json_text(dialect: Dialect, column: &str) -> SimpleExpr {
 
 impl EventEntityRepository {
     /// One multi-row INSERT.
-    pub async fn add_all_no_result(db: &mut Db<'_>, entities: &[EventEntity]) -> Result<(), Error> {
+    pub async fn add_all_no_result(
+        db: &mut AsyncDb<'_>,
+        entities: &[EventEntity],
+    ) -> Result<(), Error> {
         if entities.is_empty() {
             return Ok(());
         }
@@ -279,19 +282,19 @@ impl EventEntityRepository {
     }
 
     /// Every row, in no particular order.
-    pub async fn find_all(db: &mut Db<'_>) -> Result<Vec<EventEntity>, Error> {
+    pub async fn find_all(db: &mut AsyncDb<'_>) -> Result<Vec<EventEntity>, Error> {
         Self::find(db, None).await
     }
 
     /// The rows of one action execution.
     pub async fn find_by_action_id(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         action_id: Uuid,
     ) -> Result<Vec<EventEntity>, Error> {
         Self::find(db, Some(action_id)).await
     }
 
-    pub async fn count(db: &mut Db<'_>) -> Result<i64, Error> {
+    pub async fn count(db: &mut AsyncDb<'_>) -> Result<i64, Error> {
         let select = Query::select()
             .expr(Expr::col(Asterisk).count())
             .from(events_table())
@@ -302,7 +305,7 @@ impl EventEntityRepository {
     /// Up to `limit` undelivered events of the given types, oldest first: Java's
     /// `findUndelivered`. Rows with no event (an action that emitted none) never match.
     pub async fn find_undelivered(
-        db: &mut Db<'_>,
+        db: &mut AsyncDb<'_>,
         event_types: &[String],
         limit: u64,
     ) -> Result<Vec<EventEntity>, Error> {
@@ -320,7 +323,7 @@ impl EventEntityRepository {
     }
 
     /// Java's `markDelivered`.
-    pub async fn mark_delivered(db: &mut Db<'_>, ids: &[Uuid]) -> Result<u64, Error> {
+    pub async fn mark_delivered(db: &mut AsyncDb<'_>, ids: &[Uuid]) -> Result<u64, Error> {
         if ids.is_empty() {
             return Ok(0);
         }
@@ -345,7 +348,10 @@ impl EventEntityRepository {
         select
     }
 
-    async fn find(db: &mut Db<'_>, action_id: Option<Uuid>) -> Result<Vec<EventEntity>, Error> {
+    async fn find(
+        db: &mut AsyncDb<'_>,
+        action_id: Option<Uuid>,
+    ) -> Result<Vec<EventEntity>, Error> {
         let dialect = db.dialect();
         let mut select = Query::select();
         select.from(events_table());

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::handler::EventHandlerRegistry;
 use super::notification::{EventNotification, EventNotificationRepository, EventNotificationState};
 use crate::action::EventEntityRepository;
-use crate::distributed_jobs::{DistributedJob, ExecutionContext, Schedule};
+use crate::distributed_jobs::{AsyncDistributedJob, ExecutionContext, Schedule};
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 const BASE: Duration = Duration::from_secs(30);
@@ -90,7 +90,7 @@ impl EventFanoutJob {
             return Ok(0);
         }
         let manager = self.database_registry.transaction_manager(shard)?;
-        let mut tx = manager.begin().await?;
+        let mut tx = manager.as_async().begin().await?;
         let result = async {
             let events =
                 EventEntityRepository::find_undelivered(&mut tx.db(), &handled, self.batch_size)
@@ -145,7 +145,7 @@ impl EventFanoutJob {
     }
 }
 
-impl DistributedJob for EventFanoutJob {
+impl AsyncDistributedJob for EventFanoutJob {
     fn name(&self) -> String {
         self.name.clone()
     }
@@ -245,7 +245,7 @@ impl EventHandlingJob {
     async fn drain_batch(&self, shard: ShardIdentifier) -> Result<usize, Error> {
         let now = self.clock.instant();
         let notifications = {
-            let mut db = self.database_registry.primary(shard)?;
+            let mut db = self.database_registry.as_async().primary(shard)?;
             EventNotificationRepository::find_due(&mut db, self.batch_size, now).await?
         };
         if notifications.is_empty() {
@@ -280,7 +280,7 @@ impl EventHandlingJob {
             }
         }
         let ids = |rows: &[&EventNotification]| rows.iter().map(|n| n.id).collect::<Vec<_>>();
-        let mut db = self.database_registry.primary(shard)?;
+        let mut db = self.database_registry.as_async().primary(shard)?;
         EventNotificationRepository::mark_expired_all_preflight(
             &mut db,
             &ids(&preflight_expired),
@@ -352,7 +352,7 @@ impl EventHandlingJob {
     }
 }
 
-impl DistributedJob for EventHandlingJob {
+impl AsyncDistributedJob for EventHandlingJob {
     fn name(&self) -> String {
         self.name.clone()
     }

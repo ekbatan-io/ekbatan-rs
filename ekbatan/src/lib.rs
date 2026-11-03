@@ -8,9 +8,15 @@
 //! - `TransactionManager`: one shard's primary and replica pools, and its transactions.
 //! - `DatabaseRegistry`: every shard's `TransactionManager`.
 //! - `Db`: where statements run and which SQL to write: jOOQ's `DSLContext`.
-//! - `Repository`: Java's `AbstractRepository`, with the database selectors.
+//! - `AbstractRepository`: Java's `AbstractRepository`: what a repository says about itself;
+//!   `Repository` gives it the database selectors and ready-made methods.
+//!
+//! The plain names are the sync API, as in Java and Python; the async twins are
+//! `aio::Async*` (Python's `ekbatan.aio`). The async code is the engine; the sync API waits on
+//! it (`block_on`), on a tokio runtime of its own.
 
 pub mod action;
+pub mod aio;
 mod clock;
 mod config;
 pub(crate) mod connection;
@@ -27,26 +33,33 @@ mod registry;
 mod repository;
 mod shard;
 mod sharding_config;
+mod sync_api;
 mod transaction;
 mod types;
 
 pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
 pub use config::{DataSourceConfig, MYSQL_PROPERTIES, POSTGRES_PROPERTIES};
 pub use connection::{Connection, ConnectionProvider};
-pub use db::{Db, Dbs, Dialect, Record, Scalar};
+pub use db::{Dialect, Record, Scalar};
 pub use domain::{
     AnyModelEvent, Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase,
     ModelBuilderBase, ModelEvent, ModelId, Persistable, event_type_name,
 };
 pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};
-pub use repository::{Repository, Table, TableRecord};
+pub use repository::{AbstractRepository, Repository, Table, TableRecord};
 pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId, ShardingStrategy};
 pub use sharding_config::{
     EkbatanConfig, ShardGroupConfig, ShardMemberConfig, ShardingConfig, canonical_key,
 };
-pub use transaction::{Transaction, TransactionManager};
+pub use sync_api::db::{Db, Dbs};
+pub use sync_api::transaction::Transaction;
+pub use sync_api::{block_on, blocking_runtime};
+pub use transaction::TransactionManager;
 pub use types::DbUuid;
+
+/// The async twins, by their short path inside the crate.
+pub(crate) use aio::{AsyncDb, AsyncDbs, AsyncTransaction};
 
 /// `#[model]`, `#[entity]`, `#[model_event]`: see `ekbatan-macros`.
 pub use ekbatan_macros::{embed_migrations, entity, model, model_event};
