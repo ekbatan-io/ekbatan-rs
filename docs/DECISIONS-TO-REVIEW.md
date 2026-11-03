@@ -115,3 +115,22 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
 6. **Checks added beyond Java's**: the default shard must be a configured one; a group or a
    member twice is refused. `DataSourceConfig::validate` now runs when a pool is built.
 7. `jobs` and `local-event-handler` are kept as read; items 8 and 9 read them.
+
+## Item 9a: distributed jobs (2026-11-03)
+
+1. **Our own scheduler, db-scheduler's way** (the user chose this over apalis; no Rust crate runs
+   on PostgreSQL, MySQL *and* MariaDB with a once-per-slot claim). Kept db-scheduler's
+   `scheduled_tasks` layout because it is proven and Java's example migrations have it - not to
+   share it with Java (no sharing with Java is ever wanted).
+2. **How it works**: one row per job; a claim is one `UPDATE ... WHERE version = ?`; heartbeats
+   every 10s (Java's `EKBATAN_HEARTBEAT_INTERVAL`); dead after 6 missed (60s), then revived to
+   run now; completion recorded only if the row is still the one this instance claimed.
+3. **Schedules**: fixed delay, daily (UTC times), disabled. No cron (as the Python port).
+4. **Proof**: two instances on one database, a 1s job for 8s: 8 runs, no slot twice, on all
+   three databases (`wallet-example/tests/distributed_jobs.rs`), plus failure counting, dead
+   revival, takeover (stale result not recorded, `fraction_dead` > 0.5), shutdown waiting for a
+   running job, a missing table failing `start()`.
+5. **Shutdown waits once** for `shutdown_max_wait` (Java's db-scheduler waits up to twice), then
+   aborts the execution; its row is revived later, as after a crash.
+6. A recurring job's row keeps its stored next time when its schedule changes between deploys
+   (db-scheduler can reschedule on change; not done here).

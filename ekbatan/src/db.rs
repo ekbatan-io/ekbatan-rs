@@ -155,6 +155,28 @@ impl<'a> Db<'a> {
         )
     }
 
+    /// INSERT that skips a row clashing with any unique key, the primary key included:
+    /// `ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT IGNORE` on MySQL and MariaDB. For a
+    /// table whose key is several columns. Returns how many rows were inserted.
+    pub async fn insert_ignoring_any_duplicate(
+        &mut self,
+        insert: &InsertStatement,
+    ) -> Result<u64, Error> {
+        let postgres = {
+            let (sql, values) = for_postgres(insert);
+            (format!("{sql} ON CONFLICT DO NOTHING"), values)
+        };
+        Ok(
+            on_database!(self, postgres: postgres, mysql: for_mysql_insert_ignore(insert),
+            |sql, values, executor| {
+                sqlx::query_with(AssertSqlSafe(sql), values)
+                    .execute(executor)
+                    .await?
+                    .rows_affected()
+            }),
+        )
+    }
+
     /// Every row a SELECT, or a statement with `RETURNING`, gives back.
     pub async fn fetch_all<R: Record, S: QueryStatementWriter + Sync>(
         &mut self,

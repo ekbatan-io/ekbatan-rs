@@ -15,6 +15,7 @@ mod clock;
 mod config;
 pub(crate) mod connection;
 pub(crate) mod db;
+pub mod distributed_jobs;
 mod domain;
 mod error;
 mod ids_json;
