@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use ekbatan::{
-    ConnectionProvider, DataSourceConfig, DatabaseRegistry, Dialect, Error, ModelRepository,
+    ConnectionProvider, DataSourceConfig, DatabaseRegistry, Dialect, Error, Model, ModelRepository,
     ShardIdentifier, TransactionManager,
 };
 use rust_decimal::Decimal;
@@ -194,13 +194,13 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
     let in_global = wallets
         .db(GLOBAL)
         .unwrap()
-        .fetch_optional::<WalletsRecord>(&by_id)
+        .fetch_optional::<WalletsRecord, _>(&by_id)
         .await
         .unwrap();
     let in_mexico = wallets
         .db(MEXICO)
         .unwrap()
-        .fetch_optional::<WalletsRecord>(&by_id)
+        .fetch_optional::<WalletsRecord, _>(&by_id)
         .await
         .unwrap();
     assert!(in_global.is_none() && in_mexico.is_some());
@@ -252,13 +252,7 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
         wallets.get_by_id(&mexico.id).await.unwrap().state,
         WalletState::Settled
     );
-    let saved_over = wallets.update(None, &after).await;
-    assert!(
-        matches!(saved_over, Err(Error::StaleRecord { .. })),
-        "{saved_over:?}"
-    );
     say("tx_db_else_db(Some(tx)): an Err rolls back the add and the settle; an Ok commits both");
-    say("bulk_update: a copy read before the settle can't be saved over it (StaleRecord)");
 
     // A transaction on another shard is refused, not quietly bypassed.
     let wrong = registry
@@ -338,4 +332,110 @@ async fn run_scenario(server: &Server, create_wallets: &'static str) {
         "{saved_over:?}"
     );
     say("close_empty_wallets: one UPDATE closes the empty wallet; an older copy is now stale");
+
+    java_methods(&wallets, dialect).await;
+}
+
+/// Each of Java's repository methods, on wallets of a fresh owner.
+async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
+    let say = |what: &str| println!("[{dialect:?}] {what}");
+    let owner = Uuid::new_v4();
+    let of_owner = || Cond::all().add(Expr::col(Wallets::OwnerId).eq(owner));
+
+    // add: gives back the row as written (RETURNING), or on MySQL the model as given.
+    let one = Wallet::open(MEXICO, owner, "MXN", Decimal::new(100, 0));
+    assert_eq!(wallets.add(None, &one).await.unwrap(), one);
+
+    // addAll: one multi-row INSERT; models on two shards are refused.
+    let batch: Vec<Wallet> = (1..=3)
+        .map(|n| Wallet::open(MEXICO, owner, "MXN", Decimal::new(n, 0)))
+        .collect();
+    let mut added = wallets.add_all(None, &batch).await.unwrap();
+    added.sort_by_key(|wallet| wallet.balance);
+    assert_eq!(added, batch);
+    let mixed = [
+        Wallet::open(GLOBAL, owner, "EUR", Decimal::ONE),
+        Wallet::open(MEXICO, owner, "MXN", Decimal::ONE),
+    ];
+    assert!(matches!(
+        wallets.add_all(None, &mixed).await,
+        Err(Error::CrossShard { .. })
+    ));
+    say("add / add_all: rows given back as written; two shards in one call refused");
+
+    // update: version + 1, other columns as the model has them (updated_date included).
+    let richer = Wallet {
+        balance: Decimal::new(150, 0),
+        ..one.clone()
+    };
+    let updated = wallets.update(None, &richer).await.unwrap();
+    assert_eq!(updated, richer.next_version());
+    assert_eq!(wallets.get_by_id(&one.id).await.unwrap(), updated);
+    assert!(matches!(
+        wallets.update_no_result(None, &richer).await,
+        Err(Error::StaleRecord { version: 1, .. })
+    ));
+    say("update: version 1 -> 2, given back; an update from version 1 again is stale");
+
+    // updateAll: ONE statement for every model; all or nothing on staleness.
+    let doubled: Vec<Wallet> = batch
+        .iter()
+        .map(|wallet| Wallet {
+            balance: wallet.balance * Decimal::TWO,
+            ..wallet.clone()
+        })
+        .collect();
+    let mut all_updated = wallets.update_all(None, &doubled).await.unwrap();
+    all_updated.sort_by_key(|wallet| wallet.balance);
+    let expected: Vec<Wallet> = doubled.iter().map(Wallet::next_version).collect();
+    assert_eq!(all_updated, expected);
+    let stale_again = wallets.update_all(None, &doubled).await;
+    assert!(
+        matches!(
+            stale_again,
+            Err(Error::StaleRecords {
+                expected: 3,
+                updated: 0,
+                ..
+            })
+        ),
+        "{stale_again:?}"
+    );
+    let mut mixed_versions = expected.clone();
+    mixed_versions[0] = doubled[0].clone();
+    let partly_stale = wallets.update_all_no_result(None, &mixed_versions).await;
+    assert!(
+        matches!(
+            partly_stale,
+            Err(Error::StaleRecords {
+                expected: 3,
+                updated: 2,
+                ..
+            })
+        ),
+        "{partly_stale:?}"
+    );
+    say("update_all: one statement updates all three; stale ones are counted, not skipped");
+
+    // Reads.
+    let ids: Vec<_> = batch
+        .iter()
+        .map(|wallet| wallet.id)
+        .chain([one.id, batch[0].id])
+        .collect();
+    assert_eq!(wallets.find_all_by_ids(&ids).await.unwrap().len(), 4);
+    assert_eq!(wallets.count_where(of_owner()).await.unwrap(), 4);
+    assert!(wallets.find_all().await.unwrap().len() >= 4);
+    assert!(wallets.count().await.unwrap() >= 4);
+    assert!(wallets.exists_where(of_owner()).await.unwrap());
+    assert!(matches!(
+        wallets.find_one_where(of_owner()).await,
+        Err(Error::TooManyRows { .. })
+    ));
+    let only_one = of_owner().add(Expr::col(Wallets::Id).eq(one.id.uuid()));
+    assert_eq!(
+        wallets.find_one_where(only_one).await.unwrap(),
+        Some(updated)
+    );
+    say("find_all_by_ids / find_all / count / find_one_where / exists_where: as Java's");
 }

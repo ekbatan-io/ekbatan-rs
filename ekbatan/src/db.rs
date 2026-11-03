@@ -1,6 +1,6 @@
 use futures_util::future::try_join_all;
 use sea_query::{
-    InsertStatement, IntoIden, MysqlQueryBuilder, OnConflict, PostgresQueryBuilder,
+    Expr, InsertStatement, IntoIden, MysqlQueryBuilder, OnConflict, PostgresQueryBuilder, Query,
     QueryStatementWriter, SelectStatement, Value, Values,
 };
 use sea_query_sqlx::SqlxValues;
@@ -155,26 +155,93 @@ impl<'a> Db<'a> {
         )
     }
 
-    pub async fn fetch_all<R: Record>(
+    /// Every row a SELECT, or a statement with `RETURNING`, gives back.
+    pub async fn fetch_all<R: Record, S: QueryStatementWriter + Sync>(
         &mut self,
-        select: &SelectStatement,
+        statement: &S,
     ) -> Result<Vec<R>, Error> {
-        Ok(on_database!(self, select, |sql, values, executor| {
+        Ok(on_database!(self, statement, |sql, values, executor| {
             sqlx::query_as_with(AssertSqlSafe(sql), values)
                 .fetch_all(executor)
                 .await?
         }))
     }
 
-    pub async fn fetch_optional<R: Record>(
+    /// The first row, if any.
+    pub async fn fetch_optional<R: Record, S: QueryStatementWriter + Sync>(
         &mut self,
-        select: &SelectStatement,
+        statement: &S,
     ) -> Result<Option<R>, Error> {
-        Ok(on_database!(self, select, |sql, values, executor| {
+        Ok(on_database!(self, statement, |sql, values, executor| {
             sqlx::query_as_with(AssertSqlSafe(sql), values)
                 .fetch_optional(executor)
                 .await?
         }))
+    }
+
+    /// `SELECT EXISTS(<select>)`: jOOQ's `fetchExists`. PostgreSQL answers with a boolean,
+    /// MySQL and MariaDB with 0 or 1.
+    pub async fn fetch_exists(&mut self, select: &SelectStatement) -> Result<bool, Error> {
+        let exists = Query::select()
+            .expr(Expr::exists(select.clone()))
+            .to_owned();
+        match self.dialect {
+            Dialect::Postgres => self.fetch_scalar::<bool>(&exists).await,
+            Dialect::MySql | Dialect::MariaDb => Ok(self.fetch_scalar::<i64>(&exists).await? != 0),
+        }
+    }
+
+    /// An INSERT that gives back the rows it wrote: `RETURNING *` on PostgreSQL and MariaDB
+    /// (sea-query writes it only for PostgreSQL, so MariaDB's is added here). MySQL has no
+    /// `RETURNING`; asking for it there is a mistake.
+    pub(crate) async fn insert_returning<R: Record>(
+        &mut self,
+        insert: &InsertStatement,
+    ) -> Result<Vec<R>, Error> {
+        match self.dialect {
+            Dialect::Postgres => {
+                self.fetch_all(&insert.clone().returning_all().to_owned())
+                    .await
+            }
+            Dialect::MariaDb => {
+                let (sql, values) = insert.build(MysqlQueryBuilder);
+                self.fetch_all_sql(format!("{sql} RETURNING *"), values)
+                    .await
+            }
+            Dialect::MySql => Err(Error::Unexpected(
+                "MySQL has no RETURNING; insert, then use the model as given".to_owned(),
+            )),
+        }
+    }
+
+    /// SQL text this crate wrote for `self.dialect()`, with its values bound as parameters:
+    /// for statements sea-query can't build, such as the bulk UPDATEs.
+    pub(crate) async fn execute_sql(&mut self, sql: String, values: Values) -> Result<u64, Error> {
+        Ok(
+            on_database!(self, postgres: (sql, SqlxValues(values)), mysql: (sql, for_mysql_values(values)),
+            |sql, values, executor| {
+                sqlx::query_with(AssertSqlSafe(sql), values)
+                    .execute(executor)
+                    .await?
+                    .rows_affected()
+            }),
+        )
+    }
+
+    /// Like `execute_sql`, for statements that give back rows.
+    pub(crate) async fn fetch_all_sql<R: Record>(
+        &mut self,
+        sql: String,
+        values: Values,
+    ) -> Result<Vec<R>, Error> {
+        Ok(
+            on_database!(self, postgres: (sql, SqlxValues(values)), mysql: (sql, for_mysql_values(values)),
+            |sql, values, executor| {
+                sqlx::query_as_with(AssertSqlSafe(sql), values)
+                    .fetch_all(executor)
+                    .await?
+            }),
+        )
     }
 
     /// The first column of the one row, such as a count.
@@ -225,7 +292,11 @@ fn for_postgres(statement: &impl QueryStatementWriter) -> (String, SqlxValues) {
 /// MySQL and MariaDB get UUIDs as text: MySQL keeps them in `CHAR(36)`, and MariaDB's `UUID`
 /// type takes text. (Bound as a UUID, sqlx would send 16 raw bytes, which match neither.)
 fn for_mysql(statement: &impl QueryStatementWriter) -> (String, SqlxValues) {
-    let (sql, Values(values)) = statement.build(MysqlQueryBuilder);
+    let (sql, values) = statement.build(MysqlQueryBuilder);
+    (sql, for_mysql_values(values))
+}
+
+fn for_mysql_values(Values(values): Values) -> SqlxValues {
     let values = values
         .into_iter()
         .map(|value| match value {
@@ -233,7 +304,7 @@ fn for_mysql(statement: &impl QueryStatementWriter) -> (String, SqlxValues) {
             other => other,
         })
         .collect();
-    (sql, SqlxValues(Values(values)))
+    SqlxValues(Values(values))
 }
 
 /// `INSERT IGNORE INTO ...` for MySQL and MariaDB.

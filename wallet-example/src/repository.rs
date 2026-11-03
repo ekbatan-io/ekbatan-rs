@@ -95,8 +95,6 @@ impl WalletRepository {
 
     /// Java's `markAllSettled`: joins the caller's transaction when given one, else runs on its
     /// own on the primary. The wallets must share a shard: one transaction can't span two.
-    /// Unlike the Java docs' example, it raises the versions (`bulk_update`), so a copy read
-    /// before it can't be saved over it.
     pub async fn mark_all_settled(
         &self,
         tx: Option<&mut Transaction>,
@@ -111,8 +109,8 @@ impl WalletRepository {
                 row: other.shard(),
             });
         }
-        let update = self
-            .bulk_update()
+        let update = Query::update()
+            .table(Wallets::Table)
             .value(Wallets::State, WalletState::Settled.as_str())
             .and_where(Expr::col(Wallets::Id).is_in(ids.iter().map(ShardedId::uuid)))
             .to_owned();
@@ -201,14 +199,16 @@ impl WalletRepository {
     }
 
     /// Closes every opened wallet with nothing in it on one shard, in one statement. Joins the
-    /// caller's transaction when given one. Returns how many it closed.
+    /// caller's transaction when given one. Raises each version itself, so a copy read before
+    /// it gets `StaleRecord`. Returns how many it closed.
     pub async fn close_empty_wallets(
         &self,
         tx: Option<&mut Transaction>,
         shard: ShardIdentifier,
     ) -> Result<u64, Error> {
-        let update = self
-            .bulk_update()
+        let update = Query::update()
+            .table(Wallets::Table)
+            .value(Wallets::Version, Expr::col(Wallets::Version).add(1))
             .value(Wallets::State, WalletState::Closed.as_str())
             .and_where(Expr::col(Wallets::State).eq(WalletState::Opened.as_str()))
             .and_where(Expr::col(Wallets::Balance).eq(Decimal::ZERO))

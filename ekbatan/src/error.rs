@@ -23,6 +23,23 @@ pub enum Error {
     UnknownShard(ShardIdentifier),
     /// A row that doesn't make a valid model.
     Mapping(String),
+    /// Models on two shards in one call that must stay on one: Java's `CrossShardException`.
+    CrossShard {
+        first: ShardIdentifier,
+        second: ShardIdentifier,
+    },
+    /// A bulk update matched fewer rows than models: some were saved by someone else first.
+    StaleRecords {
+        table: String,
+        expected: usize,
+        updated: usize,
+    },
+    /// One row was expected and a shard had more: jOOQ's `TooManyRowsException`.
+    TooManyRows {
+        table: String,
+    },
+    /// Something that should not happen: Java's `IllegalStateException`.
+    Unexpected(String),
     /// A setting that can't work, such as a pool of zero connections.
     Config(String),
 }
@@ -50,6 +67,24 @@ impl fmt::Display for Error {
             Error::UnknownShard(shard) => write!(f, "no database for shard {shard}"),
             Error::Mapping(message) => write!(f, "{message}"),
             Error::Config(message) => write!(f, "invalid configuration: {message}"),
+            Error::CrossShard { first, second } => {
+                write!(
+                    f,
+                    "one call can't write to shard {first} and shard {second}"
+                )
+            }
+            Error::StaleRecords {
+                table,
+                expected,
+                updated,
+            } => {
+                write!(
+                    f,
+                    "expected to update {expected} rows of {table} but updated {updated}"
+                )
+            }
+            Error::TooManyRows { table } => write!(f, "more than one row of {table} matched"),
+            Error::Unexpected(message) => write!(f, "{message}"),
         }
     }
 }

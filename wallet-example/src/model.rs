@@ -81,4 +81,11 @@ impl Model for Wallet {
     fn version(&self) -> i64 {
         self.version
     }
+
+    fn next_version(&self) -> Wallet {
+        Wallet {
+            version: self.version + 1,
+            ..self.clone()
+        }
+    }
 }

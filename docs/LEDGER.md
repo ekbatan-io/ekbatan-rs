@@ -10,9 +10,15 @@
   each database's SQL, sends UUIDs to MySQL/MariaDB as text, and `insert_ignoring_duplicates`
   (`ON CONFLICT DO NOTHING` / `INSERT IGNORE`, which sea-query can't write for MySQL).
 - `ModelRepository`: selectors `db`, `dbs`, `readonly_db`, `readonly_dbs`, `tx_db`,
-  `tx_db_else_db` (refuses a transaction on another shard); ready-made `find_by_id`,
-  `get_by_id`, `exists_by_id`, `find_all_where`, `count_where` (every shard), `add`, `update`
-  (version check); a private `not_deleted()` like Java's; `bulk_update()`.
+  `tx_db_else_db` (refuses a transaction on another shard), and Java's methods with Java's SQL:
+  `add` / `add_all` (one multi-row INSERT; `RETURNING` on PostgreSQL and MariaDB, the model as
+  given on MySQL), `update` (version check; `RETURNING` on PostgreSQL, `next_version` on
+  MySQL/MariaDB), `update_all` (ONE statement: `UPDATE ... FROM (VALUES ...)` on PostgreSQL,
+  `UPDATE ... JOIN (SELECT ... UNION ALL ...)` on MySQL/MariaDB), the `_no_result` variants,
+  `find_by_id`, `get_by_id`, `find_all_by_ids` (per shard; `= ANY(?)` on PostgreSQL),
+  `find_all`, `exists_by_id`, `count`, `count_where`, `find_one_where`, `find_all_where`,
+  `exists_where`; a private `not_deleted()` like Java's. Batches on two shards are refused
+  (`CrossShard`).
 - `UnknownShardPolicy` (`UseDefaultShard`, the default, or `Fail`), as in Java and Python;
   `effective_shard`, also used by `tx_db`.
 - `ShardedId` in Java's bit layout; `DbUuid`.
@@ -31,6 +37,10 @@
 5. Keyed locks on a held `Connection`, with their own pool.
 6. Pool settings from config files; tracing.
 
-## Open decisions
+## Differences from Java to keep in mind
 
-- Keep `bulk_update()` as a shared helper, or let custom bulk updates raise `version` themselves?
+- MariaDB UPDATE has no `RETURNING`, so `update` there gives back `next_version()` (Java's
+  jOOQ path asks for `RETURNING`).
+- `find_all_by_ids` on MariaDB uses `IN (...)` (Java checks only MySQL; jOOQ rewrites the rest).
+- No sharding strategy yet: every id is a `ShardedId`; Java's `NoShardingStrategy` (one shard,
+  `dbs()` = default only) is not ported.

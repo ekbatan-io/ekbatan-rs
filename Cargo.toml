@@ -12,12 +12,14 @@ sea-query = { version = "1.0.2", default-features = false, features = [
     "backend-postgres",
     "backend-mysql",
     "thread-safe",
+    "postgres-array",
     "with-uuid",
     "with-rust_decimal",
     "with-chrono",
 ] }
 sea-query-sqlx = { version = "0.9.1", features = [
     "sqlx-postgres",
+    "postgres-array",
     "sqlx-mysql",
     "with-uuid",
     "with-rust_decimal",
