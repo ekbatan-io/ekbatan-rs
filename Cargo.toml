@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["ekbatan", "wallet-example", "age-pins"]
+
+# Every version here (and in Cargo.lock) was published at least 14 days before 2026-11-03.
+[workspace.dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+rust_decimal = "1.43.0"
+sea-query = { version = "1.0.2", default-features = false, features = [
+    "derive",
+    "backend-postgres",
+    "backend-mysql",
+    "thread-safe",
+    "with-uuid",
+    "with-rust_decimal",
+    "with-chrono",
+] }
+sea-query-sqlx = { version = "0.9.1", features = [
+    "sqlx-postgres",
+    "sqlx-mysql",
+    "with-uuid",
+    "with-rust_decimal",
+    "with-chrono",
+] }
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "runtime-tokio",
+    "tls-none",
+    "postgres",
+    "mysql",
+    "uuid",
+    "rust_decimal",
+    "chrono",
+    "derive",
+] }
+testcontainers-modules = { version = "0.15.0", features = ["postgres", "mysql", "mariadb"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "=1.28.0", features = ["v4"] }

@@ -1,0 +1,4 @@
+# sqlx 0.9 needs Rust 1.94+. 1.99.1 (2026-10-16) is the newest release at least 14 days old.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

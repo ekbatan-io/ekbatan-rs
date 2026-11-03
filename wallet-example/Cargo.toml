@@ -1,0 +1,17 @@
+[package]
+name = "wallet-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono.workspace = true
+ekbatan = { path = "../ekbatan" }
+rust_decimal.workspace = true
+sea-query.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+testcontainers-modules.workspace = true
+tokio.workspace = true

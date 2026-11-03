@@ -1,0 +1,34 @@
+# Holds transitive crates at their newest release published at least 14 days ago (the
+# 2-week rule). Stable cargo has no publish-date cutoff, so exact pins do the job. No code.
+[package]
+name = "age-pins"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cc = "=1.9.0"
+ctutils = "=0.4.3"
+icu_collections = "=2.3.0"
+icu_locale_core = "=2.3.0"
+icu_normalizer = "=2.3.0"
+icu_normalizer_data = "=2.3.0"
+icu_properties = "=2.3.0"
+icu_properties_data = "=2.3.0"
+icu_provider = "=2.3.1"
+log = "=0.4.34"
+rustix = "=1.1.5"
+smallvec = "=1.16.3"
+tinystr = "=0.8.4"
+tonic = "=0.14.6"
+tonic-prost = "=0.14.6"
+unicode-properties = "=0.1.4"
+ureq = "=3.4.2"
+utf8_iter = "=1.0.4"
+xattr = "=1.6.1"
+yoke = "=0.8.3"
+zerovec = "=0.11.8"
+zerovec-derive = "=0.11.6"
+crc32fast = "=1.5.3"
+utf16_iter = "=1.0.5"
+webpki-roots = "=1.0.10"
