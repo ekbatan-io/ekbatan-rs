@@ -20,6 +20,7 @@ mod domain;
 mod error;
 mod ids_json;
 pub mod json;
+pub mod keyed_lock;
 pub mod migration;
 mod registry;
 mod repository;

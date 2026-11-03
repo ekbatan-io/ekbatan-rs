@@ -51,6 +51,9 @@
   `EkbatanConfig` (Java's `ekbatan:` section from a JSON file or a parsed tree, `${VAR}`),
   `DataSourceConfig::from_jdbc_url`, `dataSourceProperties` (sqlx's names), Java's checks,
   `DatabaseRegistry::from_sharding_config`, `Migrator::targets`. Open: YAML/TOML reader choice.
+- Distributed jobs and keyed locks (item 9): `distributed_jobs` (db-scheduler's claim and
+  heartbeat on `scheduled_tasks`, `JobRegistry`, `Schedule`, `JobsConfig`), `keyed_lock`
+  (in-process, PostgreSQL advisory, MySQL/MariaDB `GET_LOCK`). No Redis lock provider yet.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
 
@@ -70,7 +73,7 @@ the database), linted, and committed before the next starts.
 | 6 | Code generation: schemagen from a test database with the migrations applied | jOOQ codegen; py `schemagen/` | done (EKB-0009) |
 | 7 | Configs: config files, data-source properties, sharding config, credentials redaction | `config/`; py `config.py`, `config_files.py` | done (EKB-0011); file format open |
 | 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | |
-| 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | |
+| 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | done (EKB-0012, EKB-0013); Redis lock open |
 | 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | |
 | 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | |
 | 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | |

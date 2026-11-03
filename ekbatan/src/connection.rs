@@ -180,4 +180,37 @@ impl Connection {
         }
         Ok(())
     }
+
+    /// Runs SQL the framework wrote itself (no user input in it), as plain text.
+    pub(crate) async fn run_generated(&mut self, sql: String) -> Result<(), Error> {
+        match &mut self.inner {
+            PooledConnection::Postgres(connection) => {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut **connection)
+                    .await?;
+            }
+            PooledConnection::MySql(connection) => {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut **connection)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One whole number (or NULL) from SQL the framework wrote itself.
+    pub(crate) async fn scalar_generated(&mut self, sql: String) -> Result<Option<i64>, Error> {
+        Ok(match &mut self.inner {
+            PooledConnection::Postgres(connection) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(&mut **connection)
+                    .await?
+            }
+            PooledConnection::MySql(connection) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(&mut **connection)
+                    .await?
+            }
+        })
+    }
 }

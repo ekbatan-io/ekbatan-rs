@@ -134,3 +134,17 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    aborts the execution; its row is revived later, as after a crash.
 6. A recurring job's row keeps its stored next time when its schedule changes between deploys
    (db-scheduler can reschedule on change; not done here).
+
+## Item 9b: keyed locks (2026-11-03)
+
+1. Java's `KeyedLockProvider` with leases and a `max_hold` watchdog: in-process (tokio mutex
+   per key), PostgreSQL (`pg_advisory_lock` / `pg_try_advisory_lock`, `SET lock_timeout` for a
+   bounded wait), MySQL and MariaDB (`GET_LOCK` / `RELEASE_LOCK`). Keys hashed as Java's
+   `LockKeyHash` (first 8 bytes of SHA-256; hex for MySQL lock names). One
+   `SqlKeyedLockProvider`, with Java's three names as aliases.
+2. **Not re-entrant.** Java's leases are re-entrant per thread; an async task has no thread of
+   its own. Taking a key the same task holds waits like any other caller.
+3. **Cancellation**: an acquire dropped mid-wait closes its connection (rather than returning it
+   to the pool), so a lock the database grants late dies with the session.
+4. A lease dropped without `release()` is released in the background.
+5. No Redis provider (Java has `ekbatan-keyed-lock-redis`): would be a new dependency; ask.
