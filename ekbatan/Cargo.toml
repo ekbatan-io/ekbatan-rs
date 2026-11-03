@@ -12,3 +12,6 @@ sea-query.workspace = true
 sea-query-sqlx.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

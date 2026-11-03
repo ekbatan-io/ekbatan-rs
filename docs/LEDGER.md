@@ -13,6 +13,8 @@
   `tx_db_else_db` (refuses a transaction on another shard); ready-made `find_by_id`,
   `get_by_id`, `exists_by_id`, `find_all_where`, `count_where` (every shard), `add`, `update`
   (version check); a private `not_deleted()` like Java's; `bulk_update()`.
+- `UnknownShardPolicy` (`UseDefaultShard`, the default, or `Fail`), as in Java and Python;
+  `effective_shard`, also used by `tx_db`.
 - `ShardedId` in Java's bit layout; `DbUuid`.
 - Wallet example: schema (hand-written, as schemagen would write it), repository with custom
   queries, tests on the three databases; connection experiments.
@@ -31,7 +33,4 @@
 
 ## Open decisions
 
-- Commits in this repository: like ekbatan-py (commit on `main`) or like Java (only when asked)?
 - Keep `bulk_update()` as a shared helper, or let custom bulk updates raise `version` themselves?
-- Unknown shard: Java defaults to routing to the default shard (`UnknownShardPolicy`); this
-  crate currently fails.

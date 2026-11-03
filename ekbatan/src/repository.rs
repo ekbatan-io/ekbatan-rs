@@ -88,7 +88,7 @@ pub trait ModelRepository: Send + Sync {
     /// The caller's transaction, refused if it is on another shard than the key. Java's
     /// `txDb(...)`, which returns an empty `Optional` instead.
     fn tx_db<'a>(&'a self, tx: &'a mut Transaction, key: impl ShardKey) -> Result<Db<'a>, Error> {
-        let shard = key.shard(self.registry().default_shard());
+        let shard = self.registry().effective_shard(key)?;
         if tx.shard() != shard {
             return Err(Error::WrongShard {
                 transaction: tx.shard(),

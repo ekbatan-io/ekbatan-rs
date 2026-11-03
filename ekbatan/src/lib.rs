@@ -24,7 +24,7 @@ pub use config::DataSourceConfig;
 pub use connection::{Connection, ConnectionProvider};
 pub use db::{Db, Dbs, Dialect, Record, Scalar};
 pub use error::Error;
-pub use registry::DatabaseRegistry;
+pub use registry::{DatabaseRegistry, UnknownShardPolicy};
 pub use repository::{Model, ModelId, ModelRepository, Table, TableRecord};
 pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId};
 pub use transaction::{Transaction, TransactionManager};
