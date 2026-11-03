@@ -1,22 +1,10 @@
-//! The sync API: the plain names (`Action`, `ActionExecutor`, `Repository`, `Db`,
-//! `Transaction`, `KeyedLockProvider`, `DistributedJob`, `EventHandler`), as in Java and Python.
-//! Their async twins are `ekbatan::aio::Async*`, as Python's `ekbatan.aio`.
+//! The tokio runtime under the sync API, and `block_on` for calling async code from sync code.
 //!
-//! The async code is the engine and the sync API waits on it, so every rule has one copy: a
-//! sync `Action`, `DistributedJob` or `EventHandler` *is* an async one too (blanket impls), so
-//! it registers in the same registries and runs in the same executor and jobs.
-//!
-//! Underneath is one tokio runtime of its own (`blocking_runtime()`), made the first time it is
-//! needed; a pool made outside any runtime lives on it. Calls with no sync twin (migrations,
-//! starting and stopping a `JobRegistry`) are run with `block_on`. The sync API is for code that
-//! is not itself async: called from an async function it blocks that function's thread, and on
-//! a single-threaded runtime it panics, as `reqwest::blocking` does.
-
-pub(crate) mod action;
-pub(crate) mod db;
-pub(crate) mod jobs;
-pub(crate) mod keyed_lock;
-pub(crate) mod transaction;
+//! The async code is the engine and the sync API (the plain names) waits on it, so every rule
+//! has one copy. The runtime is the sync API's own, made the first time it is needed; a pool made
+//! outside any runtime lives on it. The sync API is for code that is not itself async: called
+//! from an async function it blocks that function's thread, and on a single-threaded runtime it
+//! panics, as `reqwest::blocking` does.
 
 use std::future::Future;
 use std::sync::OnceLock;

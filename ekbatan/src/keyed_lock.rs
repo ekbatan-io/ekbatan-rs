@@ -19,35 +19,14 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use sha2::{Digest, Sha256};
-use tokio::sync::OwnedMutexGuard;
-use tracing::warn;
 
+use crate::aio::keyed_lock::Held;
+use crate::aio::{AsyncKeyedLockProvider, AsyncLease};
+use crate::runtime::{block_on, blocking_runtime};
 use crate::{Connection, ConnectionProvider, Dialect, Error};
 
 /// How long one SQL wait lasts before it is asked again: Java's five-second segments.
-pub use crate::sync_api::keyed_lock::{KeyedLockProvider, Lease};
-
 const SEGMENT: Duration = Duration::from_secs(5);
-
-/// A keyed lock: Java's `KeyedLockProvider`.
-pub trait AsyncKeyedLockProvider: Send + Sync {
-    /// Waits until the key is free, then holds it until the lease is released, dropped, or
-    /// `max_hold` passes.
-    fn acquire<'a>(
-        &'a self,
-        key: &'a str,
-        max_hold: Duration,
-    ) -> BoxFuture<'a, Result<AsyncLease, Error>>;
-
-    /// Waits up to `max_wait` (zero: don't wait). `None` if the key stayed held. Contention is
-    /// never an error; a failing backend is.
-    fn try_acquire<'a>(
-        &'a self,
-        key: &'a str,
-        max_wait: Duration,
-        max_hold: Duration,
-    ) -> BoxFuture<'a, Result<Option<AsyncLease>, Error>>;
-}
 
 /// Java's `LockKeyHash`: the first 8 bytes of the key's SHA-256, as a signed 64-bit number.
 pub fn lock_key_hash(key: &str) -> i64 {
@@ -55,123 +34,8 @@ pub fn lock_key_hash(key: &str) -> i64 {
     i64::from_be_bytes(digest[..8].try_into().expect("8 bytes"))
 }
 
-/// What a lease releases.
-enum Held {
-    InProcess(OwnedMutexGuard<()>),
-    Sql {
-        connection: Connection,
-        dialect: Dialect,
-        hashed: i64,
-        dirty: bool,
-    },
-}
-
-struct LeaseState {
-    key: String,
-    held: tokio::sync::Mutex<Option<Held>>,
-    watchdog: Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-/// A held lock: Java's `Lease`. `release()` frees it; dropping it frees it in the background.
-pub struct AsyncLease {
-    state: Arc<LeaseState>,
-}
-
-impl AsyncLease {
-    fn new(key: &str, held: Held, max_hold: Duration) -> AsyncLease {
-        let state = Arc::new(LeaseState {
-            key: key.to_owned(),
-            held: tokio::sync::Mutex::new(Some(held)),
-            watchdog: Mutex::new(None),
-        });
-        let watched = Arc::downgrade(&state);
-        let watchdog = tokio::spawn(async move {
-            tokio::time::sleep(max_hold).await;
-            if let Some(state) = watched.upgrade()
-                && release(&state).await
-            {
-                warn!(
-                    "Lock '{}' force-released: held longer than its max hold",
-                    state.key
-                );
-            }
-        });
-        *state.watchdog.lock().unwrap_or_else(|p| p.into_inner()) = Some(watchdog);
-        AsyncLease { state }
-    }
-
-    pub fn key(&self) -> &str {
-        &self.state.key
-    }
-
-    /// Whether this lease still holds the lock: false after `release()` or once `max_hold`
-    /// passed.
-    pub async fn is_held(&self) -> bool {
-        self.state.held.lock().await.is_some()
-    }
-
-    /// Releases the lock. Releasing twice is harmless.
-    pub async fn release(self) {
-        release(&self.state).await;
-    }
-}
-
-impl Drop for AsyncLease {
-    fn drop(&mut self) {
-        let state = self.state.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                release(&state).await;
-            });
-        }
-        // Without a runtime the lock can't be released by SQL; the connection drops with the
-        // lease and the database frees its session lock when it closes.
-    }
-}
-
-/// Frees the lock if still held. True if this call freed it.
-async fn release(state: &LeaseState) -> bool {
-    let Some(held) = state.held.lock().await.take() else {
-        return false;
-    };
-    if let Some(watchdog) = state
-        .watchdog
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take()
-        && tokio::task::try_id() != Some(watchdog.id())
-    {
-        watchdog.abort();
-    }
-    match held {
-        Held::InProcess(guard) => drop(guard),
-        Held::Sql {
-            mut connection,
-            dialect,
-            hashed,
-            dirty,
-        } => {
-            let sql = match dialect {
-                Dialect::Postgres => format!("SELECT pg_advisory_unlock({hashed})::int::int8"),
-                Dialect::MySql | Dialect::MariaDb => {
-                    format!("SELECT RELEASE_LOCK('{}')", mysql_name(hashed))
-                }
-            };
-            match connection.scalar_generated(sql).await {
-                Ok(Some(1)) if !dirty => {}
-                Ok(_) | Err(_) => {
-                    // Not released cleanly, or the session is left changed: close it, so the
-                    // database drops whatever it still holds.
-                    connection.evict();
-                }
-            }
-        }
-    }
-    true
-}
-
 /// MySQL's lock name: Java's hex of the hash (lock names are limited to 64 characters).
-fn mysql_name(hashed: i64) -> String {
+pub(crate) fn mysql_name(hashed: i64) -> String {
     format!("{:x}", hashed as u64)
 }
 
@@ -403,6 +267,87 @@ impl AsyncKeyedLockProvider for SqlKeyedLockProvider {
         max_hold: Duration,
     ) -> BoxFuture<'a, Result<Option<AsyncLease>, Error>> {
         Box::pin(self.lock(key, Some(max_wait), max_hold))
+    }
+}
+
+/// A keyed lock: Java's `KeyedLockProvider`. Implemented for every `AsyncKeyedLockProvider`
+/// (its async twin).
+pub trait KeyedLockProvider {
+    /// Waits as long as it takes for `key`, then holds it until the lease is released or
+    /// dropped, or `max_hold` passes.
+    fn acquire(&self, key: &str, max_hold: Duration) -> Result<Lease, Error>;
+
+    /// Waits at most `max_wait`; `None` if the key stayed taken.
+    fn try_acquire(
+        &self,
+        key: &str,
+        max_wait: Duration,
+        max_hold: Duration,
+    ) -> Result<Option<Lease>, Error>;
+}
+
+impl<P: AsyncKeyedLockProvider + ?Sized> KeyedLockProvider for P {
+    fn acquire(&self, key: &str, max_hold: Duration) -> Result<Lease, Error> {
+        block_on(AsyncKeyedLockProvider::acquire(self, key, max_hold)).map(Lease::new)
+    }
+
+    fn try_acquire(
+        &self,
+        key: &str,
+        max_wait: Duration,
+        max_hold: Duration,
+    ) -> Result<Option<Lease>, Error> {
+        block_on(AsyncKeyedLockProvider::try_acquire(
+            self, key, max_wait, max_hold,
+        ))
+        .map(|lease| lease.map(Lease::new))
+    }
+}
+
+/// A held lock: Java's `Lease`; its async twin is `AsyncLease`. Dropping it releases the key before the
+/// drop returns.
+pub struct Lease {
+    /// `None` only once `release` took it.
+    inner: Option<AsyncLease>,
+}
+
+impl Lease {
+    fn new(lease: AsyncLease) -> Self {
+        Lease { inner: Some(lease) }
+    }
+
+    pub fn key(&self) -> &str {
+        self.inner.as_ref().expect("taken only on release").key()
+    }
+
+    /// False once released, or once `max_hold` passed and the watchdog took it back.
+    pub fn is_held(&self) -> bool {
+        block_on(
+            self.inner
+                .as_ref()
+                .expect("taken only on release")
+                .is_held(),
+        )
+    }
+
+    pub fn release(mut self) {
+        if let Some(lease) = self.inner.take() {
+            block_on(lease.release());
+        }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Some(lease) = self.inner.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Dropped on a runtime thread, where waiting could panic (say, while a
+                // sync job unwinds): release it in the background instead.
+                blocking_runtime().spawn(lease.release());
+            } else {
+                block_on(lease.release());
+            }
+        }
     }
 }
 

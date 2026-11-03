@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ekbatan::action::{
-    ActionPlan, ActionRegistry, AsyncAction, AsyncActionExecutor, EventEntity,
-    EventEntityRepository, ExecutionConfiguration, RepositoryRegistry, RetryConfig, RetryOn,
+    ActionPlan, ActionRegistry, EventEntity, EventEntityRepository, ExecutionConfiguration,
+    RepositoryRegistry, RetryConfig, RetryOn,
 };
-use ekbatan::aio::AsyncRepository;
+use ekbatan::aio::{AsyncAction, AsyncActionExecutor, AsyncRepository};
+
 use ekbatan::{
     Clock, DatabaseRegistry, Dialect, Error, Model, Persistable, ShardIdentifier, SystemClock,
 };

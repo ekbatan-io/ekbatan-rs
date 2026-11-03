@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::TimeDelta;
-use ekbatan::action::{ActionRegistry, AsyncActionExecutor, RepositoryRegistry};
+use ekbatan::action::{ActionRegistry, RepositoryRegistry};
+use ekbatan::aio::{AsyncActionExecutor, AsyncEventHandler};
 use ekbatan::distributed_jobs::JobRegistry;
 use ekbatan::local_event_handler::{
-    AsyncEventHandler, EventEnvelope, EventFanoutJob, EventHandlerRegistry, EventHandlingJob,
-    EventNotification, EventNotificationRepository, EventNotificationState,
+    EventEnvelope, EventFanoutJob, EventHandlerRegistry, EventHandlingJob, EventNotification,
+    EventNotificationRepository, EventNotificationState,
 };
 use ekbatan::{
     Clock, ConnectionProvider, DatabaseRegistry, Dialect, Error, Persistable, ShardIdentifier,

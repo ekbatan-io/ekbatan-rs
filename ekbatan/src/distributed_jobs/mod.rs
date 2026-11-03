@@ -21,7 +21,6 @@ mod schedule;
 mod store;
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,10 +30,10 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-pub use crate::sync_api::jobs::DistributedJob;
 pub use config::{JobsConfig, parse_iso_duration};
 pub use schedule::Schedule;
 
+use crate::aio::AsyncDistributedJob;
 use crate::{Clock, ConnectionProvider, Error, Instant, SystemClock};
 use store::{Claimed, Store};
 
@@ -48,23 +47,36 @@ pub const DEFAULT_MISSED_HEARTBEATS_LIMIT: u32 = 6;
 /// db-scheduler's `shutdownMaxWait`.
 pub const DEFAULT_SHUTDOWN_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 
-/// A job that runs on one instance per scheduled slot: Java's `DistributedJob`.
-///
-/// `execute` must be idempotent: a slot can run twice (see the module docs).
-pub trait AsyncDistributedJob: Send + Sync + 'static {
-    /// Cluster-wide unique and stable: the job row's key. Asked once, when the registry is
-    /// built.
+/// What a running execution knows about itself: Java's db-scheduler `ExecutionContext`.
+/// A job that runs on one instance per scheduled slot: Java's `DistributedJob`. It is also an
+/// `AsyncDistributedJob` (its async twin), so it goes in the same
+/// `JobRegistry` with `with_job(...)`. To pause and still notice a shutdown, use
+/// `ekbatan::block_on(ctx.sleep(duration))`.
+pub trait DistributedJob: Send + Sync + 'static {
+    /// Unique and stable across deploys: the `scheduled_tasks` row's name.
     fn name(&self) -> String;
 
-    /// When the job runs. Asked once, when the registry is built.
     fn schedule(&self) -> Schedule;
 
     /// The work. An `Err` is a failed execution: `consecutive_failures` goes up and the job is
     /// rescheduled by its `Schedule`, as for a success.
-    fn execute(&self, ctx: &ExecutionContext) -> impl Future<Output = Result<(), Error>> + Send;
+    fn execute(&self, ctx: &ExecutionContext) -> Result<(), Error>;
 }
 
-/// What a running execution knows about itself: Java's db-scheduler `ExecutionContext`.
+impl<J: DistributedJob> AsyncDistributedJob for J {
+    fn name(&self) -> String {
+        DistributedJob::name(self)
+    }
+
+    fn schedule(&self) -> Schedule {
+        DistributedJob::schedule(self)
+    }
+
+    async fn execute(&self, ctx: &ExecutionContext) -> Result<(), Error> {
+        tokio::task::block_in_place(|| DistributedJob::execute(self, ctx))
+    }
+}
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     task_name: String,

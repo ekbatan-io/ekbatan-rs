@@ -31,16 +31,16 @@ pub mod local_event_handler;
 pub mod migration;
 mod registry;
 mod repository;
+mod runtime;
 mod shard;
 mod sharding_config;
-mod sync_api;
 mod transaction;
 mod types;
 
 pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
 pub use config::{DataSourceConfig, MYSQL_PROPERTIES, POSTGRES_PROPERTIES};
 pub use connection::{Connection, ConnectionProvider};
-pub use db::{Dialect, Record, Scalar};
+pub use db::{Db, Dbs, Dialect, Record, Scalar};
 pub use domain::{
     AnyModelEvent, Entity, EntityBase, EntityBuilderBase, GenericState, Id, Model, ModelBase,
     ModelBuilderBase, ModelEvent, ModelId, Persistable, event_type_name,
@@ -48,14 +48,12 @@ pub use domain::{
 pub use error::Error;
 pub use registry::{DatabaseRegistry, UnknownShardPolicy};
 pub use repository::{AbstractRepository, Repository, Table, TableRecord};
+pub use runtime::{block_on, blocking_runtime};
 pub use shard::{DefaultShard, ShardIdentifier, ShardKey, ShardedId, ShardingStrategy};
 pub use sharding_config::{
     EkbatanConfig, ShardGroupConfig, ShardMemberConfig, ShardingConfig, canonical_key,
 };
-pub use sync_api::db::{Db, Dbs};
-pub use sync_api::transaction::Transaction;
-pub use sync_api::{block_on, blocking_runtime};
-pub use transaction::TransactionManager;
+pub use transaction::{Transaction, TransactionManager};
 pub use types::DbUuid;
 
 /// The async twins, by their short path inside the crate.

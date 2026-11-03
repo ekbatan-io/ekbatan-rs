@@ -1,7 +1,6 @@
 //! Java's `EventHandler`, `EventEnvelope` and `EventHandlerRegistry`.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -9,6 +8,7 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::notification::EventNotification;
+use crate::aio::AsyncEventHandler;
 use crate::{AnyModelEvent, Error, Instant, event_type_name};
 
 /// One delivery: the event, and the action it came from. Java's `EventEnvelope`.
@@ -29,8 +29,10 @@ pub struct EventEnvelope<E> {
     pub event_date: Instant,
 }
 
-/// Reacts to one event type: Java's `EventHandler<E>`.
-pub trait AsyncEventHandler: Send + Sync + 'static {
+/// Reacts to one event type: Java's `EventHandler<E>`. It is also an `AsyncEventHandler` (its
+/// async twin), so it goes in the same
+/// `EventHandlerRegistry` with `with_handler(...)`.
+pub trait EventHandler: Send + Sync + 'static {
     /// The event type this handler subscribes to.
     type Event: AnyModelEvent + DeserializeOwned + Send;
 
@@ -43,10 +45,23 @@ pub trait AsyncEventHandler: Send + Sync + 'static {
     }
 
     /// One delivery. An `Err` is a failure: retried later, until the retention window ends.
-    fn handle(
-        &self,
-        envelope: EventEnvelope<Self::Event>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn handle(&self, envelope: EventEnvelope<Self::Event>) -> Result<(), Error>;
+}
+
+impl<H: EventHandler> AsyncEventHandler for H {
+    type Event = H::Event;
+
+    fn name(&self) -> String {
+        EventHandler::name(self)
+    }
+
+    fn aliases(&self) -> Vec<String> {
+        EventHandler::aliases(self)
+    }
+
+    async fn handle(&self, envelope: EventEnvelope<H::Event>) -> Result<(), Error> {
+        tokio::task::block_in_place(|| EventHandler::handle(self, envelope))
+    }
 }
 
 /// A handler, whatever its event type.

@@ -1,4 +1,6 @@
-use crate::{AsyncDb, Connection, ConnectionProvider, Dialect, Error, ShardIdentifier};
+use crate::aio::{AsyncTransaction, AsyncTransactionManager};
+use crate::runtime::{block_on, blocking_runtime};
+use crate::{ConnectionProvider, Db, Dialect, Error, ShardIdentifier};
 
 /// One shard's pools and transactions: Java's `TransactionManager`. Statements outside a
 /// transaction borrow from the pools (through `DatabaseRegistry`); a transaction holds one
@@ -47,112 +49,89 @@ impl TransactionManager {
     }
 }
 
-/// A shard's transactions, waited on with `.await`: the async twin of `TransactionManager`'s
-/// `begin` and `in_transaction` (Python's `AsyncTransactionManager`). `manager.as_async()`.
-#[derive(Clone, Copy)]
-pub struct AsyncTransactionManager<'a>(&'a TransactionManager);
-
-impl<'a> AsyncTransactionManager<'a> {
-    pub fn shard_identifier(&self) -> ShardIdentifier {
-        self.0.shard_identifier
-    }
-
+impl TransactionManager {
     /// Takes a primary connection and opens a transaction on it. End it with `commit()` or
     /// `rollback()`; a transaction dropped without either has its connection closed.
-    pub async fn begin(&self) -> Result<AsyncTransaction, Error> {
-        let connection = self.0.primary_connection_provider.acquire().await?;
-        AsyncTransaction::begin(connection, self.0.shard_identifier).await
+    pub fn begin(&self) -> Result<Transaction, Error> {
+        block_on(self.as_async().begin()).map(Transaction::new)
     }
 
     /// Java's `inTransaction(block)`: commits if the block returns `Ok`, rolls back if it
     /// returns `Err`, keeping the block's error as Java does.
-    pub async fn in_transaction<R>(
+    pub fn in_transaction<R>(
         &self,
-        block: impl AsyncFnOnce(&mut AsyncTransaction) -> Result<R, Error>,
+        block: impl FnOnce(&mut Transaction) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let mut tx = self.begin().await?;
-        match block(&mut tx).await {
+        let mut transaction = self.begin()?;
+        match block(&mut transaction) {
             Ok(value) => {
-                tx.commit().await?;
+                transaction.commit()?;
                 Ok(value)
             }
             Err(error) => {
-                let _ = tx.rollback().await;
+                let _ = transaction.rollback();
                 Err(error)
             }
         }
     }
 }
 
-/// A connection with a transaction open on it: Java's `Transaction`, a JDBC `Connection` with
-/// auto-commit off.
-pub struct AsyncTransaction {
-    connection: Connection,
-    shard_identifier: ShardIdentifier,
-    open: bool,
+/// A connection with a transaction open on it: Java's `Transaction`. Its async twin is
+/// `AsyncTransaction`. End it with `commit()` or `rollback()`; one
+/// dropped without either has its connection closed, and the database rolls it back.
+pub struct Transaction {
+    /// `None` only once `commit` or `rollback` took it.
+    inner: Option<AsyncTransaction>,
 }
 
-impl AsyncTransaction {
-    async fn begin(
-        mut connection: Connection,
-        shard_identifier: ShardIdentifier,
-    ) -> Result<Self, Error> {
-        let begin = match connection.dialect() {
-            Dialect::Postgres => "BEGIN",
-            Dialect::MySql | Dialect::MariaDb => "START TRANSACTION",
-        };
-        if let Err(error) = connection.run(begin).await {
-            connection.evict();
-            return Err(error);
+impl Transaction {
+    pub fn new(transaction: AsyncTransaction) -> Self {
+        Transaction {
+            inner: Some(transaction),
         }
-        Ok(AsyncTransaction {
-            connection,
-            shard_identifier,
-            open: true,
-        })
+    }
+
+    fn inner(&mut self) -> &mut AsyncTransaction {
+        self.inner
+            .as_mut()
+            .expect("a transaction is only taken when it ends")
     }
 
     pub fn shard(&self) -> ShardIdentifier {
-        self.shard_identifier
+        self.inner
+            .as_ref()
+            .expect("a transaction is only taken when it ends")
+            .shard()
     }
 
     /// Statements inside the transaction.
-    pub fn db(&mut self) -> AsyncDb<'_> {
-        self.connection.db()
+    pub fn db(&mut self) -> Db<'_> {
+        Db::new(self.inner().db())
     }
 
-    /// As in Java, a failed `COMMIT` is followed by a `ROLLBACK`; only if that fails too is the
-    /// connection closed rather than returned.
-    pub async fn commit(mut self) -> Result<(), Error> {
-        match self.connection.run("COMMIT").await {
-            Ok(()) => {
-                self.open = false;
-                Ok(())
-            }
-            Err(error) => {
-                if self.connection.run("ROLLBACK").await.is_ok() {
-                    self.open = false;
-                }
-                Err(error)
-            }
-        }
+    /// The async transaction underneath, for an async call that takes one.
+    pub fn as_async(&mut self) -> &mut AsyncTransaction {
+        self.inner()
     }
 
-    /// If the `ROLLBACK` fails, the connection is closed rather than returned.
-    pub async fn rollback(mut self) -> Result<(), Error> {
-        self.connection.run("ROLLBACK").await?;
-        self.open = false;
-        Ok(())
+    pub fn commit(mut self) -> Result<(), Error> {
+        let transaction = self.inner.take().expect("taken only here");
+        block_on(transaction.commit())
+    }
+
+    pub fn rollback(mut self) -> Result<(), Error> {
+        let transaction = self.inner.take().expect("taken only here");
+        block_on(transaction.rollback())
     }
 }
 
-impl Drop for AsyncTransaction {
-    /// Never ended, or its rollback failed: close the connection rather than return it, so no
-    /// one inherits a half-done transaction. The database rolls back what a closed connection
-    /// leaves open.
+impl Drop for Transaction {
+    /// The pooled connection hands itself back (or closes) on the runtime it came from, which
+    /// must be current when it is dropped.
     fn drop(&mut self) {
-        if self.open {
-            self.connection.close_on_drop();
+        if let Some(transaction) = self.inner.take() {
+            let _inside = blocking_runtime().enter();
+            drop(transaction);
         }
     }
 }

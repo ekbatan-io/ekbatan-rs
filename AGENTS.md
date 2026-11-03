@@ -19,14 +19,18 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
     `scheduled_tasks` (db-scheduler's design, our code).
   - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
     `eventlog.event_notifications`.
-  - `sync_api/` the sync API under the plain names (`Action`, `ActionExecutor`, `Repository`,
-    `Db`, `Transaction`, locks, jobs, handlers), waiting on the async engine on its own tokio
-    runtime; `block_on` for the rest.
-  - `aio.rs` the async twins, `Async*` (Python's `ekbatan.aio`).
+  - `aio/` the async twins, `Async*` (Python's `ekbatan.aio`): `AsyncAction`,
+    `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncTransaction`,
+    `AsyncTransactionManager`, `AsyncDatabaseRegistry`, `AsyncKeyedLockProvider`, `AsyncLease`,
+    `AsyncDistributedJob`, `AsyncEventHandler`. They are the engine; the plain (sync) names in
+    the topic modules wait on them.
+  - `runtime.rs` the sync API's tokio runtime, and `block_on` for calling async code from sync
+    code.
   - `keyed_lock.rs` `KeyedLockProvider`: in-process and database keyed locks.
   - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
   - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
-  - `repository.rs` `Repository`: Java's `AbstractRepository`, with the database selectors.
+  - `repository.rs` `AbstractRepository` (what a repository says about itself, Java's name) and
+    `Repository` (its selectors and ready-made methods).
   - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout), `ShardingStrategy`, `ShardKey`.
   - `types.rs` `DbUuid`: UUID columns on every database (Java's `UuidStringConverter`).
   - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
@@ -34,7 +38,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
 - `ekbatan-schemagen/` - generates the app's `schema.rs` in `build.rs` from a Docker database
   with the migrations applied (Java's jOOQ codegen). Building `wallet-example` needs Docker.
-- `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionSpec`, `ActionAssert`.
+- `ekbatan-test-support/` - what tests of an app use: `VirtualClock`, `ActionSpec`, `ActionAssert`;
+  `aio::AsyncActionSpec`.
 - `wallet-example/` - the wallet model, schema, repositories, actions, migrations
   (`migrations/<database>`, Java's files), and the tests on real databases.
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.

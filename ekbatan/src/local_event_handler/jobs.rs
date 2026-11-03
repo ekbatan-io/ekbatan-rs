@@ -11,7 +11,8 @@ use uuid::Uuid;
 use super::handler::EventHandlerRegistry;
 use super::notification::{EventNotification, EventNotificationRepository, EventNotificationState};
 use crate::action::EventEntityRepository;
-use crate::distributed_jobs::{AsyncDistributedJob, ExecutionContext, Schedule};
+use crate::aio::AsyncDistributedJob;
+use crate::distributed_jobs::{ExecutionContext, Schedule};
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 const BASE: Duration = Duration::from_secs(30);

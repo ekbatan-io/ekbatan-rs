@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ekbatan::distributed_jobs::{AsyncDistributedJob, ExecutionContext, JobRegistry, Schedule};
+use ekbatan::aio::AsyncDistributedJob;
+use ekbatan::distributed_jobs::{ExecutionContext, JobRegistry, Schedule};
 use ekbatan::{ConnectionProvider, Dialect, Error, Instant};
 use sea_query::{Alias, Expr, ExprTrait, Query};
 

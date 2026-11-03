@@ -41,7 +41,7 @@ impl ConnectionProvider {
         }
         config.validate()?;
         // Made outside any runtime (sync code), the pool lives on the sync API's runtime.
-        let pool = crate::sync_api::in_some_runtime(|| -> Result<Pool, Error> {
+        let pool = crate::runtime::in_some_runtime(|| -> Result<Pool, Error> {
             Ok(match config.dialect {
                 Dialect::Postgres => Pool::Postgres(
                     pool_options(config).connect_lazy_with(config.postgres_options()?),

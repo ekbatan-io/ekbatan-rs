@@ -1,22 +1,22 @@
-//! `ActionSpec` for actions (`ekbatan::action::Action`); `aio::AsyncActionSpec` is its async twin.
-//! `perform` runs right here, on the test's thread.
+//! `AsyncActionSpec`: the async twin of `ActionSpec`, for an `AsyncAction`; `perform` is
+//! awaited.
 
 use ekbatan::Error;
-use ekbatan::action::Action;
 use ekbatan::action::ActionPlan;
+use ekbatan::aio::AsyncAction;
 
 use crate::ActionAssert;
 
-/// Runs one action in a test: Java's `ActionSpec`. Nothing is written; `execute`
-/// hands back an `ActionAssert` over the result and the plan.
-pub struct ActionSpec<'a, A: Action> {
+/// Runs one async action in a test, as Java's `ActionSpec`. Nothing is written; `execute` hands back an
+/// `ActionAssert` over the result and the plan.
+pub struct AsyncActionSpec<'a, A: AsyncAction> {
     action: &'a A,
     principal: Option<String>,
 }
 
-impl<'a, A: Action> ActionSpec<'a, A> {
+impl<'a, A: AsyncAction> AsyncActionSpec<'a, A> {
     pub fn of(action: &'a A) -> Self {
-        ActionSpec {
+        AsyncActionSpec {
             action,
             principal: None,
         }
@@ -28,36 +28,41 @@ impl<'a, A: Action> ActionSpec<'a, A> {
     }
 
     /// Runs `perform`; panics with the error if it fails.
-    pub fn execute(&self, params: A::Params) -> ActionAssert<A::Result> {
+    pub async fn execute(&self, params: A::Params) -> ActionAssert<A::Result> {
         let mut plan = ActionPlan::new();
         match self
             .action
             .perform(&mut plan, self.principal.as_deref(), &params)
+            .await
         {
             Ok(result) => ActionAssert::new(result, plan),
             Err(error) => panic!("Expected the action to succeed but it failed: {error}"),
         }
     }
 
-    /// Runs `perform`, expects it to fail, and hands back the error.
-    pub fn execute_err(&self, params: A::Params) -> Error {
+    /// Runs `perform`, expects it to fail, and hands back the error. Java's
+    /// `assertThrows(type, params, verifier)`: check the error's kind with `matches!` or
+    /// `Error::action_error::<E>()`.
+    pub async fn execute_err(&self, params: A::Params) -> Error {
         let mut plan = ActionPlan::new();
         match self
             .action
             .perform(&mut plan, self.principal.as_deref(), &params)
+            .await
         {
             Ok(_) => panic!("Expected the action to fail but nothing was returned as an error"),
             Err(error) => error,
         }
     }
 
-    /// For an app error: expects `Error::Action` holding an `E`, and hands it to `verifier`.
-    pub fn assert_fails_with<E: std::error::Error + 'static>(
+    /// Java's `assertThrows(type, params)` for an app error: expects `Error::Action` holding an
+    /// `E`, and hands it to `verifier`.
+    pub async fn assert_fails_with<E: std::error::Error + 'static>(
         &self,
         params: A::Params,
         verifier: impl FnOnce(&E),
     ) -> &Self {
-        let error = self.execute_err(params);
+        let error = self.execute_err(params).await;
         match error.action_error::<E>() {
             Some(found) => verifier(found),
             None => panic!("Expected {} but got {error:?}", std::any::type_name::<E>()),

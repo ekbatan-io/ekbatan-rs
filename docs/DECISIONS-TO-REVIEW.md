@@ -180,8 +180,9 @@ name things as Python does: plain names sync, `Async*` names async in `ekbatan::
    `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncDbs`, `AsyncTransaction`,
    `AsyncKeyedLockProvider`, `AsyncLease`, `AsyncDistributedJob`, `AsyncEventHandler` in
    `ekbatan::aio`, and `AsyncActionSpec` in `ekbatan_test_support::aio`. (`ekbatan::async` is
-   impossible: `async` is a reserved word.) The `Async*` types can also still be reached at
-   their topic modules' paths (`ekbatan::action::AsyncAction`).
+   impossible: `async` is a reserved word.) The folders match, as in Python: the sync code is
+   in the topic modules (`action/`, `repository.rs`, `keyed_lock.rs`, ...), every `Async*`
+   type is in `ekbatan/src/aio/` and reachable only as `ekbatan::aio::...`.
 2. **`AbstractRepository` (Java's name) is what a repository implements**: types, `registry`,
    `from_record`, `to_record`, `sharding_strategy`. `Repository` (sync) and `AsyncRepository`
    are given to every `AbstractRepository`, so one repository serves both. Without that split,

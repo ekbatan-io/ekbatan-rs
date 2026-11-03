@@ -4,8 +4,8 @@
 use sea_query::{Alias, Expr, ExprTrait, IntoIden, Order, Query};
 use uuid::Uuid;
 
+use crate::AsyncDb;
 use crate::action::{json_text, json_value};
-use crate::db::AsyncDb;
 use crate::{DbUuid, Error, Instant, truncate_to_micros};
 
 /// A notification's state: Java's `EventNotificationState`.

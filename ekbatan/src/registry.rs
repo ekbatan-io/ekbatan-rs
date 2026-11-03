@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::transaction::AsyncTransactionManager;
+use crate::aio::AsyncDatabaseRegistry;
+use crate::runtime::block_on;
 use crate::{
-    AsyncDb, AsyncDbs, ConnectionProvider, Error, ShardIdentifier, ShardingConfig,
-    TransactionManager,
+    ConnectionProvider, Db, Dbs, Error, ShardIdentifier, ShardingConfig, TransactionManager,
 };
 
 /// What to do with a shard this deployment has no database for: Java's `UnknownShardPolicy`.
@@ -103,81 +103,41 @@ impl DatabaseRegistry {
         Ok(&self.transaction_managers[&shard])
     }
 
+    /// Every shard's `TransactionManager`, in shard order.
+    pub(crate) fn managers(&self) -> impl Iterator<Item = &TransactionManager> {
+        self.transaction_managers.values()
+    }
+
     /// The async view: statements and `close()` waited on with `.await`.
     pub fn as_async(&self) -> AsyncDatabaseRegistry<'_> {
         AsyncDatabaseRegistry(self)
     }
 }
 
-/// The registry's databases, waited on with `.await`: the async twin of `DatabaseRegistry`'s
-/// `primary`, `secondary`, `primaries`, `secondaries` and `close` (Python's
-/// `AsyncDatabaseRegistry`). `registry.as_async()`.
-#[derive(Clone, Copy)]
-pub struct AsyncDatabaseRegistry<'a>(&'a DatabaseRegistry);
-
-impl<'a> AsyncDatabaseRegistry<'a> {
-    pub fn default_shard(&self) -> ShardIdentifier {
-        self.0.default_shard
-    }
-
-    pub fn registry(&self) -> &'a DatabaseRegistry {
-        self.0
-    }
-
-    /// The shard's transactions, async.
-    pub fn transaction_manager(
-        &self,
-        shard: ShardIdentifier,
-    ) -> Result<AsyncTransactionManager<'a>, Error> {
-        Ok(self.0.transaction_manager(shard)?.as_async())
-    }
-
+impl DatabaseRegistry {
     /// Statements on the shard's primary pool: Java's `primary.get(shard)`.
-    pub fn primary(&self, shard: ShardIdentifier) -> Result<AsyncDb<'a>, Error> {
-        Ok(self
-            .0
-            .transaction_manager(shard)?
-            .primary_connection_provider()
-            .db())
+    pub fn primary(&self, shard: ShardIdentifier) -> Result<Db<'_>, Error> {
+        self.as_async().primary(shard).map(Db::new)
     }
 
     /// Statements on the shard's replica pool (the primary's when it has none).
-    pub fn secondary(&self, shard: ShardIdentifier) -> Result<AsyncDb<'a>, Error> {
-        Ok(self
-            .0
-            .transaction_manager(shard)?
-            .secondary_connection_provider()
-            .db())
+    pub fn secondary(&self, shard: ShardIdentifier) -> Result<Db<'_>, Error> {
+        self.as_async().secondary(shard).map(Db::new)
     }
 
     /// Every shard's primary pool.
-    pub fn primaries(&self) -> AsyncDbs<'a> {
-        AsyncDbs(
-            self.0
-                .transaction_managers
-                .values()
-                .map(|manager| manager.primary_connection_provider().db())
-                .collect(),
-        )
+    pub fn primaries(&self) -> Dbs<'_> {
+        Dbs::new(self.as_async().primaries())
     }
 
     /// Every shard's replica pool.
-    pub fn secondaries(&self) -> AsyncDbs<'a> {
-        AsyncDbs(
-            self.0
-                .transaction_managers
-                .values()
-                .map(|manager| manager.secondary_connection_provider().db())
-                .collect(),
-        )
+    pub fn secondaries(&self) -> Dbs<'_> {
+        Dbs::new(self.as_async().secondaries())
     }
 
     /// Closes every pool: Java's `close()`.
-    pub async fn close(&self) {
-        for manager in self.0.transaction_managers.values() {
-            manager.primary_connection_provider().close().await;
-            manager.secondary_connection_provider().close().await;
-        }
+    pub fn close(&self) {
+        block_on(self.as_async().close())
     }
 }
 

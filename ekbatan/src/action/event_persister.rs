@@ -9,7 +9,7 @@ use futures_util::future::BoxFuture;
 use sea_query::{Alias, Asterisk, Expr, ExprTrait, IntoIden, Query, SimpleExpr};
 use uuid::Uuid;
 
-use crate::db::AsyncDb;
+use crate::AsyncDb;
 use crate::{AnyModelEvent, AsyncTransaction, DbUuid, Dialect, Error, Instant, ShardIdentifier};
 
 /// One event as the event log receives it: the event and the model it belongs to.
