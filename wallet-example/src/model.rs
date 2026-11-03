@@ -38,6 +38,41 @@ impl WalletState {
 }
 
 /// Java's `Wallet extends Model<Wallet, ShardedId<Wallet>, WalletState>`.
+///
+/// Immutable, as Java's `final` fields: each value is read through a getter, and a change makes
+/// a new wallet through `copy()...build()`. This reads and copies:
+///
+/// ```
+/// # use ekbatan::{Clock, Model, ShardIdentifier, SystemClock};
+/// # use rust_decimal::Decimal;
+/// # use wallet_example::model::Wallet;
+/// let wallet = Wallet::create_wallet(ShardIdentifier::new(0, 0), uuid::Uuid::new_v4(), "EUR",
+///     Decimal::ONE, SystemClock.instant()).build().unwrap();
+/// let richer = wallet.copy().balance(Decimal::TEN).build().unwrap();
+/// assert_eq!(*richer.balance(), Decimal::TEN);
+/// ```
+///
+/// and this, the same with the value set in place, does not compile:
+///
+/// ```compile_fail,E0616
+/// # use ekbatan::{Clock, Model, ShardIdentifier, SystemClock};
+/// # use rust_decimal::Decimal;
+/// # use wallet_example::model::Wallet;
+/// let mut wallet = Wallet::create_wallet(ShardIdentifier::new(0, 0), uuid::Uuid::new_v4(), "EUR",
+///     Decimal::ONE, SystemClock.instant()).build().unwrap();
+/// wallet.balance = Decimal::TEN;
+/// ```
+///
+/// nor does reaching the base fields (id, version, state, dates, events):
+///
+/// ```compile_fail,E0616
+/// # use ekbatan::{Clock, ShardIdentifier, SystemClock};
+/// # use rust_decimal::Decimal;
+/// # use wallet_example::model::Wallet;
+/// let mut wallet = Wallet::create_wallet(ShardIdentifier::new(0, 0), uuid::Uuid::new_v4(), "EUR",
+///     Decimal::ONE, SystemClock.instant()).build().unwrap();
+/// wallet.base = wallet.base.clone();
+/// ```
 #[model(id = ShardedId<Wallet>, state = WalletState)]
 pub struct Wallet {
     pub owner_id: Uuid,

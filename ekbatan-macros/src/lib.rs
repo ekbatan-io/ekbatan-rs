@@ -9,6 +9,10 @@
 //! - `#[model_event(Model)]`: Java's `extends ModelEvent<Model>`; derives `Clone`, `Debug` and
 //!   serde's `Serialize` / `Deserialize` with Java's camelCase names.
 //!
+//! The struct's own fields become private, each read through a getter of the field's
+//! visibility (`wallet.balance()`), so a value can't be changed in place: Java's `final`
+//! fields. A change goes through `copy()...build()`.
+//!
 //! An optional `validate = path` names a `fn(&Self) -> Result<(), ekbatan::Error>` that `build()`
 //! runs last, as Java's constructors run `Validate.notBlank(...)` and the like.
 
@@ -86,7 +90,9 @@ fn expand_persistable(
 
     let mut names = Vec::new();
     let mut types = Vec::new();
-    for field in &fields.named {
+    let mut getter_vis = Vec::new();
+    let mut getter_docs = Vec::new();
+    for field in &mut fields.named {
         let ident = field.ident.clone().expect("a named field has a name");
         if ident == "base" {
             return Err(syn::Error::new_spanned(
@@ -94,6 +100,20 @@ fn expand_persistable(
                 format!("{what} adds a field called `base`; rename this one"),
             ));
         }
+        // Java's `public final`: the field becomes private, and a getter with the field's own
+        // visibility reads it. A value then changes only through `copy()...build()`.
+        getter_vis.push(std::mem::replace(
+            &mut field.vis,
+            syn::Visibility::Inherited,
+        ));
+        getter_docs.push(
+            field
+                .attrs
+                .iter()
+                .filter(|a| a.path().is_ident("doc"))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         names.push(ident);
         types.push(field.ty.clone());
     }
@@ -209,6 +229,16 @@ fn expand_persistable(
                     .copy_base(self)
                     #(.#names(::core::clone::Clone::clone(&self.#names)))*
             }
+        }
+
+        #[allow(dead_code)]
+        impl #name {
+            #(
+                #(#getter_docs)*
+                #getter_vis fn #names(&self) -> &#types {
+                    &self.#names
+                }
+            )*
         }
 
         #[doc = #doc]

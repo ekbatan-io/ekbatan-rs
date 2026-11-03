@@ -53,7 +53,7 @@ fn a_missing_field_is_named_as_java_names_it() {
 fn copy_keeps_the_events_and_adds_new_ones() {
     let wallet = wallet();
     let richer = wallet.deposit(Decimal::new(5, 0)).unwrap();
-    assert_eq!(richer.balance, Decimal::new(15, 0));
+    assert_eq!(*richer.balance(), Decimal::new(15, 0));
     assert_eq!(richer.version(), 1, "a change doesn't bump the version");
     assert_eq!(richer.id(), wallet.id());
     let types: Vec<_> = richer.events().iter().map(|e| e.event_type()).collect();
@@ -69,7 +69,7 @@ fn equality_ignores_events_and_next_version_adds_one() {
     let next = wallet.next_version();
     assert_eq!(next.version(), 2);
     assert_ne!(next, wallet);
-    assert_eq!(next.balance, wallet.balance);
+    assert_eq!(*next.balance(), *wallet.balance());
 }
 
 #[test]

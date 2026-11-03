@@ -69,9 +69,9 @@ impl Repository for WalletRepository {
             id: DbUuid(wallet.id().uuid()),
             version: wallet.version(),
             state: wallet.state().as_str().to_owned(),
-            owner_id: DbUuid(wallet.owner_id),
-            currency: wallet.currency.clone(),
-            balance: wallet.balance,
+            owner_id: DbUuid(*wallet.owner_id()),
+            currency: wallet.currency().clone(),
+            balance: *wallet.balance(),
             created_date: wallet.created_date().naive_utc(),
             updated_date: wallet.updated_date().naive_utc(),
         }
@@ -117,10 +117,10 @@ impl Repository for NotificationRepository {
             id: DbUuid(notification.id().value()),
             version: notification.version(),
             state: ekbatan::Entity::state(notification).as_str().to_owned(),
-            wallet_id: DbUuid(notification.wallet_id),
-            kind: notification.kind.clone(),
-            recipient: notification.recipient.clone(),
-            message: notification.message.clone(),
+            wallet_id: DbUuid(*notification.wallet_id()),
+            kind: notification.kind().clone(),
+            recipient: notification.recipient().clone(),
+            message: notification.message().clone(),
         }
     }
 }
@@ -249,7 +249,7 @@ impl WalletRepository {
             .into_iter()
             .map(Self::from_record)
             .collect::<Result<Vec<_>, _>>()?;
-        wallets.sort_by_key(|wallet| Reverse(wallet.balance));
+        wallets.sort_by_key(|wallet| Reverse(*wallet.balance()));
         wallets.truncate(limit);
         Ok(wallets)
     }

@@ -80,3 +80,13 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    before. The example generates from PostgreSQL.
 6. The schemagen test starts the three databases one after another: started together on one
    runtime, MySQL's container timed out twice (alone it is ready in about 5s).
+
+## Immutable models and entities (2026-11-03, asked by the user)
+
+1. `#[model]` / `#[entity]` make the struct's own fields private and add a getter per field,
+   with the field's declared visibility, returning a reference: `wallet.balance()` is a
+   `&Decimal`. A value changes only through `copy()...build()`, as Java's `final` fields.
+2. Inside the model's own module the fields are still reachable (Rust's privacy is per
+   module); the module's methods take `&self`, so they can't change them either.
+3. Proven by `compile_fail` doc tests on `Wallet` (assigning a field, reaching `base`) next to
+   a positive one that differs only in that line.

@@ -167,7 +167,7 @@ async fn run(dialect: Dialect) {
     assert_eq!(richer.version(), 2);
     let stored = app.wallets.get_by_id(wallet.id()).await.unwrap();
     assert_eq!(stored.version(), 2);
-    assert_eq!(stored.balance, Decimal::new(1550, 2));
+    assert_eq!(*stored.balance(), Decimal::new(1550, 2));
     let deposited = events_where(&app.registry, MEXICO, |e| {
         e.event_type.as_deref() == Some("WalletMoneyDepositedEvent")
     })
@@ -285,7 +285,7 @@ async fn run(dialect: Dialect) {
         )
         .await
         .unwrap();
-    assert_eq!(after.balance, Decimal::new(2, 0));
+    assert_eq!(*after.balance(), Decimal::new(2, 0));
     let no_retry = ExecutionConfiguration::builder().no_retry();
     let failed = app
         .executor
@@ -500,13 +500,13 @@ impl Action for StaleOnce {
     ) -> Result<Wallet, Error> {
         let id = ekbatan::ShardedId::from_uuid(params.wallet_id);
         let wallet = self.wallets.get_by_id(&id).await?;
-        if wallet.balance == Decimal::ONE {
+        if *wallet.balance() == Decimal::ONE {
             // Someone else saves it first: our copy goes stale.
             let theirs = wallet.copy().balance(Decimal::new(2, 0)).build()?;
             self.wallets.update_no_result(None, &theirs).await?;
             return plan.update(wallet.copy().balance(Decimal::new(99, 0)).build()?);
         }
-        if wallet.balance == Decimal::new(2, 0) && wallet.version() == 2 {
+        if *wallet.balance() == Decimal::new(2, 0) && wallet.version() == 2 {
             return plan.update(wallet.copy().build()?);
         }
         // Third call (no_retry run): stale again.

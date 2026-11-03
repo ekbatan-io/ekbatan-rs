@@ -87,7 +87,7 @@ async fn run_scenario(cluster: &common::Cluster) {
     let read_twice = read_once.clone();
     let richer = read_once
         .copy()
-        .balance(read_once.balance + Decimal::ONE)
+        .balance(*read_once.balance() + Decimal::ONE)
         .build()
         .unwrap();
     wallets.update(None, &richer).await.unwrap();
@@ -97,7 +97,10 @@ async fn run_scenario(cluster: &common::Cluster) {
         "{stale:?}"
     );
     let after = wallets.get_by_id(mexico.id()).await.unwrap();
-    assert_eq!((after.version(), after.balance), (2, Decimal::new(5100, 2)));
+    assert_eq!(
+        (after.version(), *after.balance()),
+        (2, Decimal::new(5100, 2))
+    );
     say("update: the second writer of version 1 gets StaleRecord; the row is at version 2");
 
     // Transactions: an Err rolls back both writes; an Ok commits both.
@@ -226,7 +229,7 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
         .map(|n| open(MEXICO, owner, "MXN", Decimal::new(n, 0)))
         .collect();
     let mut added = wallets.add_all(None, &batch).await.unwrap();
-    added.sort_by_key(|wallet| wallet.balance);
+    added.sort_by_key(|wallet| *wallet.balance());
     assert_eq!(added, batch);
     let mixed = [
         open(GLOBAL, owner, "EUR", Decimal::ONE),
@@ -255,13 +258,13 @@ async fn java_methods(wallets: &WalletRepository, dialect: Dialect) {
         .map(|wallet| {
             wallet
                 .copy()
-                .balance(wallet.balance * Decimal::TWO)
+                .balance(*wallet.balance() * Decimal::TWO)
                 .build()
                 .unwrap()
         })
         .collect();
     let mut all_updated = wallets.update_all(None, &doubled).await.unwrap();
-    all_updated.sort_by_key(|wallet| wallet.balance);
+    all_updated.sort_by_key(|wallet| *wallet.balance());
     let expected: Vec<Wallet> = doubled.iter().map(Wallet::next_version).collect();
     assert_eq!(all_updated, expected);
     let stale_again = wallets.update_all(None, &doubled).await;
