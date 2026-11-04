@@ -263,3 +263,27 @@ Java's `io.ekbatan.core.shard` found these missing, now added:
    `UnknownShardPolicy`.)
 
 Not ported: Java's `ShardAwareId` interface (Rust's `ShardKey` trait plays its part).
+
+## TLS via rustls (2026-11-04, the user's choice)
+
+Found while building the MySQL example: sqlx was built with `tls-none`, so a password login to
+MySQL 8.4 (its default `caching_sha2_password` needs TLS or an RSA exchange) failed, and no
+database that requires TLS could be reached. Java gets both from its drivers (Connector/J and
+MariaDB Connector/J encrypt by default); Python's PyMySQL does RSA through `cryptography`. The
+user chose TLS via rustls.
+
+1. sqlx's `tls-rustls` (ring, Mozilla's root certificates built in; no OpenSSL, no OS trust
+   store). Every crate it needs was already in the lock file, at releases past the 2-week rule.
+2. Settings as before, now honoured: `sslmode`, `sslrootcert`, `sslcert`, `sslkey` (PostgreSQL)
+   and `sslmode`, `sslca`, `sslcert`, `sslkey` (MySQL, MariaDB) in `dataSourceProperties`.
+   sqlx's defaults stay: `prefer` / `PREFERRED`, so TLS is used when the server offers it,
+   without checking the certificate; `verify-full` / `VERIFY_IDENTITY` checks it.
+3. No `mysql-rsa`: the `rsa` crate carries an unfixed advisory (RUSTSEC-2023-0071). So on
+   MySQL 8.4+ with TLS turned off, a password's *first* login is refused; once the server has
+   cached the password (after any TLS login), a plain login gets in. Tested.
+4. Tested on the three databases (`wallet-example/tests/tls.rs`): password logins over TLSv1.3
+   on MySQL 8.4 and MariaDB 11.8; PostgreSQL with TLS on encrypts under `require` and `prefer`,
+   and `verify-full` refuses a self-signed certificate. No password appears in any error.
+
+Also fixed in the same commit: EKB-0015's bulk rename had turned `Error::Action` (an app's own
+error) into `Error::AsyncAction`; it is `Error::Action` again.
