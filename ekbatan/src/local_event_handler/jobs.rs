@@ -412,7 +412,10 @@ impl EventHandlingJob {
             .catch_unwind()
             .await
             .unwrap_or_else(|panic| {
-                Err(Error::from_panic(&format!("handler '{}'", n.handler_name), panic))
+                Err(Error::from_panic(
+                    &format!("handler '{}'", n.handler_name),
+                    panic,
+                ))
             });
         match handled {
             Ok(()) => true,

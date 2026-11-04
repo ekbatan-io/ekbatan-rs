@@ -48,7 +48,11 @@ mod tests {
         let before = truncate_to_micros(Utc::now());
         let read = SystemClock.instant();
         assert!(before <= read && read <= Utc::now());
-        assert_eq!(read.timestamp_subsec_nanos() % 1_000, 0, "whole microseconds");
+        assert_eq!(
+            read.timestamp_subsec_nanos() % 1_000,
+            0,
+            "whole microseconds"
+        );
     }
 
     #[test]
