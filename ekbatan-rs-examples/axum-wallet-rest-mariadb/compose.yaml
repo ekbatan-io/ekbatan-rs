@@ -1,0 +1,16 @@
+# The database `cargo run` talks to, with the login and database `ekbatan.json` defaults to.
+# `docker compose up -d` starts it; `docker compose down` removes it. init.sql lets `wallet`
+# create the `eventlog` database the first migration makes.
+services:
+  mariadb:
+    image: mariadb:11.8
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_USER: wallet
+      MARIADB_PASSWORD: wallet
+      MARIADB_DATABASE: wallet
+      TZ: UTC
+    ports:
+      - "3306:3306"
+    volumes:
+      - "./init.sql:/docker-entrypoint-initdb.d/init.sql:ro"

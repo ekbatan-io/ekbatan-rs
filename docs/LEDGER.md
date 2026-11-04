@@ -90,3 +90,21 @@ the database), linted, and committed before the next starts.
 - No `#[repository]` macro: a repository implements the `Repository` trait by hand
   (`from_record` / `to_record`), as Java's subclasses do; a macro would save little.
 - Judgement calls for the user are in `docs/DECISIONS-TO-REVIEW.md`.
+
+## Item 11: examples (ledger)
+
+Standalone apps under `ekbatan-rs-examples/`, each its own crate importing only `ekbatan` and
+what its `Cargo.toml` names; workspace members but not default members (they share the lock
+file, so the 2-week pins hold for them, while `cargo test` at the root stays the framework's).
+Web framework: axum. Each example: README, migrations, `ekbatan.json`, schema generated in
+`build.rs`, and a test against real databases.
+
+| # | Example | Status |
+|---|---|---|
+| 11a | `axum-wallet-rest-pg`: REST service (async), keyed lock on deposit, event handler -> notification | done (EKB-0022) |
+| 11b | `axum-wallet-rest-mysql`, `axum-wallet-rest-mariadb`: the same, per database, written by `sync-examples.py` | done (EKB-0022) |
+| 11c | `axum-wallet-rest-sharded-pg`: two databases, id routing, cross-shard transfer refused (422) | |
+| 11d | `axum-wallet-saga-pg`: transfer as three event-chained steps, compensation, 202 | |
+| 11e | `job-worker-pg`: no HTTP, blocking jobs once per slot, clean shutdown | |
+| 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | |
+| 11g | `ekbatan-rs-examples/README.md` and a check that the per-database copies stay identical | |

@@ -1,0 +1,43 @@
+{
+  "ekbatan": {
+    "namespace": "example.wallet",
+    "sharding": {
+      "defaultShard": { "group": 0, "member": 0 },
+      "groups": [
+        {
+          "group": 0,
+          "name": "global",
+          "members": [
+            {
+              "member": 0,
+              "name": "global",
+              "configs": {
+                "primaryConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:mariadb://localhost:3306/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 20
+                },
+                "jobsConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:mariadb://localhost:3306/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 5
+                },
+                "lockConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:mariadb://localhost:3306/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 30
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "local-event-handler": {
+      "handling": { "enabled": true }
+    }
+  }
+}

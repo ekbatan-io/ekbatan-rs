@@ -1,0 +1,27 @@
+[package]
+name = "axum-wallet-rest-mysql"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+chrono.workspace = true
+ekbatan = { path = "../../ekbatan" }
+rust_decimal.workspace = true
+sea-query.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util = "=0.1.5"
+testcontainers-modules.workspace = true
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+
+[build-dependencies]
+ekbatan = { path = "../../ekbatan" }
+ekbatan-schemagen = { path = "../../ekbatan-schemagen" }
