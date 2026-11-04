@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use futures_util::future::join_all;
 use opentelemetry::KeyValue;
 use tracing::{error, warn};
@@ -406,7 +407,14 @@ impl EventHandlingJob {
             );
             return false;
         };
-        match handler.handle(n).await {
+        // A panicking handler is a failed delivery, retried with backoff, as an `Err` is.
+        let handled = std::panic::AssertUnwindSafe(handler.handle(n))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| {
+                Err(Error::from_panic(&format!("handler '{}'", n.handler_name), panic))
+            });
+        match handled {
             Ok(()) => true,
             Err(e) => {
                 warn!(

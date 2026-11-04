@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
+use futures_util::FutureExt;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -390,7 +391,13 @@ impl Shared {
             stopping: self.stopping.clone(),
         };
         debug!("Job '{name}' execution started");
-        let outcome = job.job.execute(&ctx).await;
+        // A panic is a failed run, as an `Err` is: caught here, so the run still leaves
+        // `running`, its row is released and its next slot is scheduled. Uncaught, the run
+        // stayed "running" on this instance for good while the heartbeat kept its claim alive.
+        let outcome = std::panic::AssertUnwindSafe(job.job.execute(&ctx))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(Error::from_panic(&format!("job '{name}'"), panic)));
         let done = self.clock.instant();
         match &outcome {
             Ok(()) => debug!("Job '{name}' execution finished"),

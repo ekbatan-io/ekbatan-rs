@@ -161,9 +161,14 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
    `modelId` / `modelName` keys are ignored by the event struct (they are on the envelope).
 3. **`ExecutionContext` gained `is_shutting_down()` and `sleep()`** (Java's
    `getSchedulerState().isShuttingDown()`), so looping jobs end when the registry stops.
-4. A handler error is logged and retried; a handler that panics is not caught (Java catches
-   `Throwable`). Kept so a panic stays loud; the job's loop ends, and the scheduler runs it again
-   on its next slot.
+4. A handler error is logged and retried. **Corrected 2026-11-04:** a handler that panics is
+   now caught too and treated as a failed delivery (backoff, then expiry), as Java catches
+   `Throwable`. This note used to say a panic stays uncaught and "the scheduler runs it again on
+   its next slot"; that was wrong: an uncaught panic left the job marked running on its instance
+   for good, with its heartbeat keeping the claim alive, so it never ran again until a restart.
+   Found by a docs agent reading the code; proven by `wallet-example/tests/job_panic.rs` (the job
+   ran once in 10 seconds instead of every 200 ms). Fixed for any job, too: a job that panics is
+   a failed run, and its next slot is scheduled.
 5. No metrics yet (Java counts fan-out and handling in OpenTelemetry): item 10.
 6. `LocalEventHandlerConfig` reads `ekbatan.local-event-handler` (Java's keys; ISO-8601
    durations); `handling.enabled` is off unless set, as in Java. Wiring the jobs into a

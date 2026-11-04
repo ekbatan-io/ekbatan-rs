@@ -57,6 +57,17 @@ pub enum Error {
 }
 
 impl Error {
+    /// A panic caught at a boundary the framework guards (a job's run, a handler's delivery),
+    /// as a failure carrying the panic's message: Java's scheduler catches every `Throwable`.
+    pub(crate) fn from_panic(what: &str, panic: Box<dyn std::any::Any + Send>) -> Self {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic with no message".to_owned());
+        Error::Unexpected(format!("{what} panicked: {message}"))
+    }
+
     /// Wraps an app's own error as an action failure: `Err(Error::action(InsufficientFunds))`.
     pub fn action(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Error::Action(Box::new(error))
