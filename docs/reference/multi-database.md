@@ -1,0 +1,217 @@
+# Multi-database
+
+The three databases, the column-type cheatsheet, and the UTC rule. PostgreSQL, MySQL and MariaDB are supported; this page is what differs between them, and what to write so the same code runs on each.
+
+Three databases are supported: **PostgreSQL, MySQL and MariaDB**. There is no SQLite, and no
+other database. A `DataSourceConfig`'s `Dialect` - `Postgres`, `MySql` or `MariaDb` - says which
+one a pool talks to; MySQL and MariaDB share sqlx's MySQL driver.
+
+Most of the framework works the same on every database. The differences sit in two places: **the
+column types in your migrations**, and a few statements the framework writes differently per
+database for you. Get the column types right and the rest follows.
+
+## Column-type cheatsheet
+
+| what | PostgreSQL | MySQL | MariaDB | Rust type in the row |
+| --- | --- | --- | --- | --- |
+| an id (uuid) | `UUID` | `CHAR(36) CHARACTER SET ascii` | `UUID`, or `CHAR(36) CHARACTER SET ascii` | `ekbatan::DbUuid` |
+| a moment | `TIMESTAMP` | `DATETIME(6)` | `DATETIME(6)` | `chrono::NaiveDateTime`, holding UTC |
+| money, exact numbers | `DECIMAL(p, s)` | `DECIMAL(p, s)` | `DECIMAL(p, s)` | `rust_decimal::Decimal` |
+| the version | `BIGINT` | `BIGINT` | `BIGINT` | `i64` |
+| a state, short text | `VARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` | `String` |
+| true or false | `BOOLEAN` | `BOOLEAN` (`TINYINT(1)`) | `BOOLEAN` (`TINYINT(1)`) | `bool` |
+| JSON (the framework's own columns) | `JSONB` | `JSON` | `JSON` | read by the framework as text |
+
+The example's `wallets` table, three ways:
+
+```sql
+-- PostgreSQL
+CREATE TABLE wallets (
+    id           UUID           PRIMARY KEY,
+    version      BIGINT         NOT NULL,
+    state        VARCHAR(24)    NOT NULL,
+    owner_id     UUID           NOT NULL,
+    currency     CHAR(3)        NOT NULL,
+    balance      DECIMAL(19, 4) NOT NULL,
+    created_date TIMESTAMP      NOT NULL,
+    updated_date TIMESTAMP      NOT NULL
+);
+
+-- MySQL
+CREATE TABLE wallets (
+    id           CHAR(36) CHARACTER SET ascii NOT NULL,
+    version      BIGINT         NOT NULL,
+    state        VARCHAR(24)    NOT NULL,
+    owner_id     CHAR(36) CHARACTER SET ascii NOT NULL,
+    currency     CHAR(3)        NOT NULL,
+    balance      DECIMAL(19, 4) NOT NULL,
+    created_date DATETIME(6)    NOT NULL,
+    updated_date DATETIME(6)    NOT NULL,
+    PRIMARY KEY (id)
+);
+
+-- MariaDB
+CREATE TABLE wallets (
+    id           UUID           PRIMARY KEY,
+    version      BIGINT         NOT NULL,
+    state        VARCHAR(24)    NOT NULL,
+    owner_id     UUID           NOT NULL,
+    currency     CHAR(3)        NOT NULL,
+    balance      DECIMAL(19, 4) NOT NULL,
+    created_date DATETIME(6)    NOT NULL,
+    updated_date DATETIME(6)    NOT NULL
+);
+```
+
+From these three, [schemagen](/reference/schemagen/) writes **the same Rust module**, byte for
+byte. So one schema module, one model and one repository serve every database.
+
+### Uuids on MySQL and MariaDB
+
+MySQL has no uuid type, so an id is `CHAR(36)`: the hyphenated text, 36 characters. Add
+`CHARACTER SET ascii` in the migration. Under MySQL's default character set, `utf8mb4`, a
+`CHAR(36)` reserves four bytes per character - 144 bytes per index entry where 36 would do, on a
+primary key read by every request.
+
+The framework writes uuids to MySQL and MariaDB as that text, and `DbUuid` reads text, MariaDB's
+own `UUID` type, and 16 raw bytes. MariaDB's `UUID` (10.7 and later) is stored in 16 bytes and
+reads back the same; the MariaDB examples use it. `BINARY(16)` is not supported for writing: the
+framework would write text into it.
+
+**schemagen reads a MySQL or MariaDB `CHAR(36)` as a uuid only on columns named `id` or ending
+`_id`.** Name your id columns that way.
+
+### JSON
+
+The framework's own JSON columns - `action_params` and `payload` in the event tables - are
+`JSONB` on PostgreSQL and `JSON` on MySQL and MariaDB. The framework reads and writes them itself.
+
+For JSON columns in your own tables, there is no built-in Rust type: schemagen stops at one and
+asks for a [forced type](/reference/schemagen/#forced-types).
+
+## Always UTC
+
+### What the clock gives is what is stored
+
+**The framework never shifts a time.** A model's `created_date` is an `Instant` - chrono's
+`DateTime<Utc>` - and the repository writes its UTC digits into a zone-less column, and reads them
+back as UTC:
+
+```rust
+// to_record
+created_date: wallet.created_date().naive_utc(),
+// from_record
+.created_date(record.created_date.and_utc())
+```
+
+No zone is added, removed or moved anywhere: not in models, repositories, the outbox, the event
+notifications or the job table. Every time the framework writes comes from a `Clock` it was given -
+`SystemClock` by default, `VirtualClock` in tests - never from the wall clock read on the spot.
+
+**Times are cut to whole microseconds.** `SystemClock::instant()` gives UTC cut to microseconds,
+and a model's dates are cut the same way when it is built. The three databases keep no finer
+detail, so a value reads back equal to what was written.
+
+### The rule
+
+UTC everywhere is **strongly recommended**. Nothing refuses another zone, but leaving it is where
+time bugs come from. It has three parts:
+
+1. **In your code, UTC.** Take the time from the framework's clock (`self.clock.instant()` in an
+   action), not from the local time. Turn it into a person's local time only where you show it.
+2. **In the columns, no zone.** `TIMESTAMP` (without time zone) on PostgreSQL, `DATETIME(6)` on
+   MySQL and MariaDB, holding UTC.
+   - **Not `TIMESTAMPTZ`** for your own columns: it makes the session's zone part of every write
+     and read.
+   - **Not a bare `DATETIME`** on MySQL and MariaDB: it silently cuts to whole seconds, and the
+     outbox's only ordering key is a timestamp.
+3. **On the database, UTC.** What the framework writes does not depend on the server's zone. The
+   database's **own** clock does: `NOW()`, `CURRENT_TIMESTAMP` and a column `DEFAULT` follow the
+   session's zone, so SQL that mixes them with your columns is off by the zone's offset. Run the
+   server in UTC (`TZ=UTC` on the container; `timezone = 'UTC'` on PostgreSQL). On MySQL and
+   MariaDB, sqlx already sets each session's `time_zone` to `+00:00`; leave the `timezone` driver
+   setting alone.
+
+The one framework table that steps off this rule is `scheduled_tasks`, whose layout is
+db-scheduler's: its PostgreSQL times are `timestamp with time zone`. See
+[`scheduled_tasks`](/reference/tables/scheduled-tasks/).
+
+## Schema and database
+
+The framework's two event tables, `events` and `event_notifications`, always live in a place
+called `eventlog`. What that is depends on the database.
+
+**On PostgreSQL** `eventlog` is a schema **inside** the database you connect to, so the tables are
+`eventlog.events` and `eventlog.event_notifications`. Your first migration creates it with
+`CREATE SCHEMA IF NOT EXISTS eventlog;`, which the connecting user can normally do. Every database -
+so every shard - has its own.
+
+**On MySQL and MariaDB** a schema and a database are the same thing. So `eventlog` is a
+**separate database** beside yours. Two things follow:
+
+1. Your first migration creates it, in a file of its own before the tables:
+   `CREATE DATABASE IF NOT EXISTS eventlog;` (`V0000__create_eventlog_database.sql`). It runs on
+   your database's connection, so the login needs the right to create `eventlog` and use it. The
+   examples' MySQL and MariaDB containers grant it in an `init.sql`, run as root when the
+   container is first created:
+
+   ```sql
+   GRANT ALL PRIVILEGES ON *.* TO 'wallet'@'%';
+   FLUSH PRIVILEGES;
+   ```
+
+   A narrower grant, `GRANT ALL PRIVILEGES ON eventlog.* TO 'wallet'@'%';`, is enough for
+   `eventlog` itself.
+2. There is **one `eventlog` per server**, shared by every database on it. Two shards, or two
+   applications, on one server would write into the same two tables, and the fan-out job picks
+   events by type alone. So give each shard a server of its own. The framework's own tests run one
+   server per shard on MySQL and MariaDB for this reason.
+
+You never tell the framework where these tables are: the executor, the fan-out job and the
+handling job name them themselves. See [Framework tables](/reference/tables/).
+
+## Partial indexes (PostgreSQL only)
+
+PostgreSQL can index only the rows a `WHERE` picks:
+
+```sql
+CREATE INDEX events_undelivered ON eventlog.events (event_type, event_date)
+    WHERE delivered = FALSE;
+```
+
+MySQL and MariaDB cannot. The portable form puts the column the `WHERE` tests first in the index
+instead:
+
+```sql
+CREATE INDEX events_pending_fanout ON eventlog.events (delivered, event_type, event_date);
+```
+
+The partial one holds only the rows still waiting, so it stays small however large the table
+grows. The examples use it on PostgreSQL.
+
+## What the framework does differently per database
+
+| | PostgreSQL | MySQL | MariaDB |
+| --- | --- | --- | --- |
+| `INSERT ... RETURNING` | yes: `add` gives back the row as stored | **no**: `add` gives back the model as given | yes |
+| `UPDATE ... RETURNING` | yes | no: `update` gives back the model's next version | no: the same |
+| many ids in one read | `id = ANY($1)`, one array parameter | `id IN (...)` | `id IN (...)` |
+| insert, ignoring a duplicate | `ON CONFLICT DO NOTHING` | `INSERT IGNORE` | `INSERT IGNORE` |
+| keyed lock | `pg_advisory_lock` | `GET_LOCK`; waits rounded to whole seconds | `GET_LOCK` |
+| migration lock | advisory lock | `GET_LOCK` | `GET_LOCK` |
+| schema changes in a migration | rolled back with it | commit on their own | commit on their own |
+| TLS by default | when the server offers it | when the server offers it | when the server offers it |
+| a password login without TLS | works | the first login is refused - see [MySQL](/reference/dialects/mysql/) | works |
+
+## Adding another database
+
+Only these three are supported. Another one takes a change to the framework itself: a driver sqlx
+supports, the per-database statements above, the lock provider, and schemagen's type mapping.
+
+## See also
+
+- [PostgreSQL](/reference/dialects/postgresql/) · [MySQL](/reference/dialects/mysql/) ·
+  [MariaDB](/reference/dialects/mariadb/) - one page each, for what only that database does
+- [schemagen](/reference/schemagen/) - how it reads your database back
+- [Framework tables](/reference/tables/) - the shape of `events` and its neighbours, per database
+- [Migrations](/reference/migrations/) - one schema change per file on MySQL and MariaDB

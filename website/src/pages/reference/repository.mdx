@@ -1,0 +1,459 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Repository
+activeSection: reference
+lead: "A repository reads and writes one model or entity type. You write the mapping - how a row becomes a value and back - by implementing AbstractRepository. The common reads and writes then come with it, in a blocking and an async kind, and you add only the queries your business needs."
+---
+
+import ModeTabs from "../../components/ModeTabs.astro";
+
+```rust
+use ekbatan::{AbstractRepository, DatabaseRegistry, DbUuid, Error, Model, Persistable,
+    ShardedId, ShardingStrategy};
+
+pub struct WalletRepository {
+    registry: Arc<DatabaseRegistry>,
+}
+
+impl AbstractRepository for WalletRepository {
+    type Persistable = Wallet;
+    type Record = WalletsRecord;
+
+    fn registry(&self) -> &DatabaseRegistry {
+        &self.registry
+    }
+
+    fn sharding_strategy(&self) -> ShardingStrategy {
+        ShardingStrategy::EmbeddedBits
+    }
+
+    fn from_record(record: WalletsRecord) -> Result<Wallet, Error> {
+        let state = WalletState::parse(&record.state)
+            .ok_or_else(|| Error::Mapping(format!("unknown wallet state {:?}", record.state)))?;
+        WalletBuilder::new()
+            .id(ShardedId::from_uuid(record.id.0))
+            .version(record.version)
+            .state(state)
+            .owner_id(record.owner_id.0)
+            .currency(record.currency)
+            .balance(record.balance)
+            .created_date(record.created_date.and_utc())
+            .updated_date(record.updated_date.and_utc())
+            .build()
+    }
+
+    fn to_record(wallet: &Wallet) -> WalletsRecord {
+        WalletsRecord {
+            id: DbUuid(wallet.id().uuid()),
+            version: wallet.version(),
+            state: wallet.state().as_str().to_owned(),
+            owner_id: DbUuid(*wallet.owner_id()),
+            currency: wallet.currency().clone(),
+            balance: *wallet.balance(),
+            created_date: wallet.created_date().naive_utc(),
+            updated_date: wallet.updated_date().naive_utc(),
+        }
+    }
+}
+```
+
+That is a whole repository. `find_by_id`, `add`, `update`, `find_all_where` and the rest come
+with it.
+
+## The three traits
+
+| trait | what it is |
+|---|---|
+| `ekbatan::AbstractRepository` | **what you implement**: the types, where the databases are, the mapping, the sharding |
+| `ekbatan::blocking::Repository` | the ready-made methods and database selectors, blocking |
+| `ekbatan::aio::AsyncRepository` | the same, `async`, waited on with `.await` |
+
+`Repository` and `AsyncRepository` are implemented for **every** `AbstractRepository`. So one
+repository serves blocking and async code alike: import the trait of the kind you use.
+
+If a module imports both, a call like `wallets.get_by_id(id)` matches both traits and doesn't
+compile. Name the trait in the call:
+
+```rust
+AsyncRepository::get_by_id(&*wallets, &id).await?
+```
+
+The same ready-made method has the same SQL in both kinds. The blocking one waits on the async
+one.
+
+## The record
+
+A repository maps between your model and a **record**: one row of its table, as plain values.
+You don't write the record. [schemagen](/reference/schemagen/) generates it in `build.rs`, from a
+database with your migrations applied, and `ekbatan::include_schema!()` brings it into a module.
+For a `wallets` table you get:
+
+- **`Wallets`**: an enum with one variant per column, plus `Table`, for building SQL with
+  sea-query: `Expr::col(Wallets::OwnerId)`. It implements `ekbatan::Table`.
+- **`WalletsRecord`**: a struct with one field per column, read by sqlx
+  (`#[derive(sqlx::FromRow)]`). It implements `ekbatan::TableRecord`.
+
+The ready-made methods need the table to have an `id`, a `version` and a `state` column.
+
+UUID columns come as `DbUuid`, a wrapper that reads the same from all three databases
+(`record.id.0` is the `Uuid`). Timestamp columns come as `chrono::NaiveDateTime`: a model's
+`Instant` goes in with `.naive_utc()` and comes out with `.and_utc()`, the digits unchanged. See
+[Multi-database](/reference/multi-database/).
+
+## Write the mapping
+
+```rust
+pub trait AbstractRepository: Send + Sync {
+    type Persistable: Persistable;   // the model or entity
+    type Record: TableRecord;        // its generated record
+
+    fn registry(&self) -> &DatabaseRegistry;
+    fn from_record(record: Self::Record) -> Result<Self::Persistable, Error>;
+    fn to_record(persistable: &Self::Persistable) -> Self::Record;
+
+    fn sharding_strategy(&self) -> ShardingStrategy { ShardingStrategy::NoSharding }
+    fn effective_shard(&self, key: impl ShardKey) -> Result<ShardIdentifier, Error>;
+    fn shard_of_all(&self, models: &[Self::Persistable]) -> Result<ShardIdentifier, Error>;
+}
+```
+
+- **`registry`** returns the `DatabaseRegistry` the repository reads and writes through. Keep an
+  `Arc<DatabaseRegistry>` in the struct.
+- **`from_record`** builds a value from a row. Use the builder, so the row is checked like any
+  new value (and your `validate` runs). A state text you don't know is `Error::Mapping`. A model
+  read back has **no events**.
+- **`to_record`** turns a value into a row. Every column, including `version` and `state`.
+- **`sharding_strategy`**: `NoSharding` (the default) puts everything on the default shard.
+  `EmbeddedBits` reads the shard from each id, which must then be a `ShardedId`. See
+  [Sharding](/reference/sharding/).
+
+`effective_shard` and `shard_of_all` are provided. Leave them as they are.
+
+The state is stored as text. Give your state enum an `as_str()` and a `parse()`, as in the
+example, so the text in the column is what the soft-delete rule looks for (`DELETED`).
+
+## Ready-made writes
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+use ekbatan::blocking::Repository;
+
+repo.add(tx, &model)?;              // -> the row as written
+repo.add_no_result(tx, &model)?;    // -> ()
+repo.add_all(tx, &models)?;         // -> Vec, one multi-row INSERT
+repo.add_all_no_result(tx, &models)?;
+repo.update(tx, &model)?;           // -> the row at version + 1
+repo.update_no_result(tx, &model)?;
+repo.update_all(tx, &models)?;      // -> Vec, one UPDATE
+repo.update_all_no_result(tx, &models)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+use ekbatan::aio::AsyncRepository;
+
+repo.add(tx, &model).await?;              // -> the row as written
+repo.add_no_result(tx, &model).await?;    // -> ()
+repo.add_all(tx, &models).await?;         // -> Vec, one multi-row INSERT
+repo.add_all_no_result(tx, &models).await?;
+repo.update(tx, &model).await?;           // -> the row at version + 1
+repo.update_no_result(tx, &model).await?;
+repo.update_all(tx, &models).await?;      // -> Vec, one UPDATE
+repo.update_all_no_result(tx, &models).await?;
+```
+
+</div>
+</ModeTabs>
+
+`tx` is `Option<&mut Transaction>` (`Option<&mut AsyncTransaction>` in async code). With
+`Some(tx)` the write joins that [transaction](/reference/transaction-manager/). With `None` it
+runs on its own on the shard's primary and commits at once.
+
+- **`update` is the optimistic lock**: `UPDATE ... SET every column, version = version + 1 WHERE
+  id = ? AND version = ?`, with the version the value was read at. No row matched means someone
+  saved first: `Error::StaleRecord`. The `_all` forms match each row on its id and version in
+  one statement, and return `Error::StaleRecords` when fewer rows matched than values given.
+- **The `_all` forms need every value on one shard.** Values on two shards are refused with
+  `Error::CrossShard`.
+- **The `_no_result` forms** return nothing, which saves reading rows back. The executor uses
+  these.
+
+What the others return depends on the database:
+
+| | PostgreSQL | MariaDB | MySQL |
+|---|---|---|---|
+| `add`, `add_all` | the rows read back (`RETURNING`) | the rows read back (`RETURNING`) | the values as given |
+| `update`, `update_all` | the rows read back (`RETURNING`) | the values at version + 1 | the values at version + 1 |
+
+A row read back has no events. A value given back as passed keeps the events it carried.
+
+Inside an action, don't call these: stage on the [plan](/reference/action-plan/), and the
+executor writes it. See [Custom queries inside perform()](#custom-queries-inside-perform).
+
+## Ready-made reads
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+repo.find_by_id(&id)?;                  // -> Option<M>
+repo.get_by_id(&id)?;                   // -> M, or Error::NotFound
+repo.find_all_by_ids(&ids)?;            // -> Vec<M>
+repo.find_all()?;                       // -> Vec<M>
+repo.find_one_where(condition)?;        // -> Option<M>
+repo.find_all_where(condition)?;        // -> Vec<M>
+repo.count()?;                          // -> i64
+repo.count_where(condition)?;           // -> i64
+repo.exists_by_id(&id)?;                // -> bool
+repo.exists_where(condition)?;          // -> bool
+```
+
+</div>
+<div slot="async">
+
+```rust
+repo.find_by_id(&id).await?;            // -> Option<M>
+repo.get_by_id(&id).await?;             // -> M, or Error::NotFound
+repo.find_all_by_ids(&ids).await?;      // -> Vec<M>
+repo.find_all().await?;                 // -> Vec<M>
+repo.find_one_where(condition).await?;  // -> Option<M>
+repo.find_all_where(condition).await?;  // -> Vec<M>
+repo.count().await?;                    // -> i64
+repo.count_where(condition).await?;     // -> i64
+repo.exists_by_id(&id).await?;          // -> bool
+repo.exists_where(condition).await?;    // -> bool
+```
+
+</div>
+</ModeTabs>
+
+A condition is a sea-query `Condition`. An expression turns into one with `.into()`, and
+`Cond::all()` / `Cond::any()` join several:
+
+```rust
+let mine = wallets.find_all_where(Expr::col(Wallets::OwnerId).eq(owner_id).into())?;
+
+let opened = Cond::all()
+    .add(Expr::col(Wallets::State).eq(WalletState::Opened.as_str()))
+    .add(Expr::col(Wallets::Balance).lt(threshold));
+let poor = wallets.find_all_where(opened)?;
+```
+
+Every one of them:
+
+- **skips soft-deleted rows**: `state <> 'DELETED'` is added for you;
+- **reads the primary**, never a replica;
+- **reads by id on the id's shard**, through the sharding strategy;
+- **reads by condition on every shard, one after the other**, and puts the answers together.
+  Under `NoSharding`, "every shard" is the default shard only;
+- **runs on its own**, outside any transaction.
+
+`find_all_by_ids` groups the ids by shard and asks each shard once (`id = ANY(...)` on
+PostgreSQL, `id IN (...)` on MySQL and MariaDB). A repeated id is asked for once.
+`find_one_where` returns the row of the first shard that has one; more than one matching row on a
+shard is `Error::TooManyRows`.
+
+There is no offset paging. "Rows 100 to 120" has no meaning when the rows are on several
+databases, each in its own order. Page by key instead ("the next 20 after the last id I saw"),
+in a method of your own.
+
+## Custom queries
+
+When the ready-made methods are not enough, write the query with sea-query and run it on a
+database you pick. Which one you pick decides what your query sees:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+self.db(key)?                     // Db: the shard's primary
+self.readonly_db(key)?            // Db: the shard's replica
+self.tx_db(tx, key)?              // Db: inside your transaction
+self.tx_db_else_db(tx, key)?      // Db: the transaction if Some, else the primary
+self.dbs()                        // Dbs: every shard's primary
+self.readonly_dbs()               // Dbs: every shard's replica
+```
+
+</div>
+<div slot="async">
+
+```rust
+self.db(key)?                     // AsyncDb: the shard's primary
+self.readonly_db(key)?            // AsyncDb: the shard's replica
+self.tx_db(tx, key)?              // AsyncDb: inside your transaction
+self.tx_db_else_db(tx, key)?      // AsyncDb: the transaction if Some, else the primary
+self.dbs()                        // AsyncDbs: every shard's primary
+self.readonly_dbs()               // AsyncDbs: every shard's replica
+```
+
+</div>
+</ModeTabs>
+
+`key` names the shard. It can be an id (`&wallet_id`, read through the sharding strategy), a
+`ShardIdentifier`, or `DefaultShard`. A shard the registry doesn't have goes to the default
+shard, or is refused, as the registry's [unknown-shard policy](/reference/sharding/) says.
+
+A shard with no replica configured reads its primary for `readonly_db`.
+
+`tx_db` refuses a transaction on another shard than the key, with `Error::WrongShard`. One
+transaction can't reach two databases.
+
+### Picking the right one
+
+| you want | use |
+| --- | --- |
+| the usual read | a ready-made read: the primary, outside any transaction |
+| a custom read that must be current | `db(key)` or `dbs()` |
+| a custom read where some lag is fine | `readonly_db(key)` or `readonly_dbs()` |
+| a read that must see your transaction's uncommitted writes | `tx_db(tx, key)` |
+| an insert, update or delete | `tx_db_else_db(tx, key)`: joins the transaction you pass, or runs on its own |
+| "this must run inside a transaction" | `tx_db(tx, key)`: it takes a transaction, not an `Option` |
+| one query on every shard | `dbs()` or `readonly_dbs()` |
+
+### What a Db runs
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+// ekbatan::blocking::Db
+db.execute(&statement)?                                 // -> rows changed (u64)
+db.fetch_all::<Record, _>(&select)?                     // -> Vec<Record>
+db.fetch_optional::<Record, _>(&select)?                // -> Option<Record>
+db.fetch_scalar::<i64>(&select)?                        // -> one value, such as a count
+db.fetch_exists(&select)?                               // -> bool
+db.insert_ignoring_duplicates(&insert, Table::Id)?      // -> rows inserted
+db.insert_ignoring_any_duplicate(&insert)?              // -> rows inserted
+db.dialect()                                            // Postgres, MySql or MariaDb
+
+// ekbatan::blocking::Dbs: every shard at the same time
+dbs.fetch_all::<Record>(&select)?                       // -> every shard's rows
+dbs.fetch_scalars::<i64>(&select)?                      // -> one value per shard
+dbs.into_vec()                                          // -> Vec<Db>, to go shard by shard
+```
+
+</div>
+<div slot="async">
+
+```rust
+// ekbatan::aio::AsyncDb
+db.execute(&statement).await?
+db.fetch_all::<Record, _>(&select).await?
+db.fetch_optional::<Record, _>(&select).await?
+db.fetch_scalar::<i64>(&select).await?
+db.fetch_exists(&select).await?
+db.insert_ignoring_duplicates(&insert, Table::Id).await?
+db.insert_ignoring_any_duplicate(&insert).await?
+db.dialect()
+
+// ekbatan::aio::AsyncDbs: every shard at the same time
+dbs.fetch_all::<Record>(&select).await?
+dbs.fetch_scalars::<i64>(&select).await?
+dbs.into_vec()
+```
+
+</div>
+</ModeTabs>
+
+A statement is a sea-query statement; the `Db` writes its SQL for the shard's database. A row
+type is any struct that `#[derive(sqlx::FromRow)]` can read from both PostgreSQL and MySQL: a
+generated record, or your own. `insert_ignoring_duplicates` skips rows whose key column already
+exists (`ON CONFLICT (key) DO NOTHING` on PostgreSQL, `INSERT IGNORE` on MySQL and MariaDB).
+
+On a pool, each statement borrows a connection only while it runs. In a transaction, every
+statement uses the transaction's connection.
+
+### Examples
+
+A read from every shard's replica, at the same time:
+
+```rust
+pub async fn find_all_by_owner_id(&self, owner_id: Uuid) -> Result<Vec<Wallet>, Error> {
+    let select = Query::select()
+        .column(Asterisk)
+        .from(Wallets::Table)
+        .and_where(Expr::col(Wallets::OwnerId).eq(owner_id))
+        .and_where(Expr::col(Wallets::State).ne(WalletState::Deleted.as_str()))
+        .to_owned();
+    let records = self.readonly_dbs().fetch_all::<WalletsRecord>(&select).await?;
+    records.into_iter().map(Self::from_record).collect()
+}
+```
+
+A count on every shard, added up:
+
+```rust
+pub async fn total_opened_wallets(&self) -> Result<i64, Error> {
+    let count = Query::select()
+        .expr(Func::count(Expr::col(Asterisk)))
+        .from(Wallets::Table)
+        .and_where(Expr::col(Wallets::State).eq(WalletState::Opened.as_str()))
+        .to_owned();
+    Ok(self.readonly_dbs().fetch_scalars::<i64>(&count).await?.into_iter().sum())
+}
+```
+
+A write that joins the caller's transaction when given one:
+
+```rust
+pub async fn mark_all_settled(
+    &self,
+    tx: Option<&mut AsyncTransaction>,
+    ids: &[ShardedId<Wallet>],
+) -> Result<u64, Error> {
+    let Some(first) = ids.first() else {
+        return Ok(0);
+    };
+    let update = Query::update()
+        .table(Wallets::Table)
+        .value(Wallets::State, WalletState::Settled.as_str())
+        .and_where(Expr::col(Wallets::Id).is_in(ids.iter().map(ShardedId::uuid)))
+        .to_owned();
+    self.tx_db_else_db(tx, first)?.execute(&update).await
+}
+```
+
+A write that changes rows behind the models' backs should raise their version itself
+(`.value(Wallets::Version, Expr::col(Wallets::Version).add(1))`), so a copy read before it gets
+`Error::StaleRecord` when it is saved.
+
+### Custom queries inside perform()
+
+`perform()` runs **before** the action's transaction opens. So a write from inside `perform()`
+has no transaction to join: with `None` it runs on its own and commits at once, outside the
+action's commit and with no event row. That is the [dual write](/learn/the-dual-write-trap/) the
+framework exists to prevent. Inside `perform()`, read freely, and stage writes on the plan.
+
+The same write is right inside a job, a handler, or your own
+[transaction](/reference/transaction-manager/).
+
+## Soft delete in custom queries
+
+The ready-made reads skip rows whose `state` is `DELETED`. A query you write does not. Add the
+condition yourself when you want it, as the examples above do with
+`Expr::col(Wallets::State).ne(...)`.
+
+## Registering repositories
+
+The executor writes each staged type through the repository registered for it:
+
+```rust
+let repositories = RepositoryRegistry::builder()
+    .with_repository(wallets.clone())          // Arc<WalletRepository>
+    .with_repository(notifications.clone())    // Arc<NotificationRepository>
+    .build();
+```
+
+`ekbatan::repository::RepositoryRegistry` keys each repository by its `Persistable` type. Hold
+repositories in an `Arc`, so the registry, the actions and the rest of your code share one.
+
+## See also
+
+- [Model](/reference/model/) · [Entity](/reference/entity/) - what a repository stores
+- [TransactionManager](/reference/transaction-manager/) - transactions to pass as `tx`
+- [schemagen](/reference/schemagen/) - where the record comes from
+- [Sharding](/reference/sharding/) - strategies and shard keys

@@ -1,0 +1,91 @@
+# The dual-write trap
+
+Why writing to a database and to a broker separately creates silent drift, and why the event has to be stored with the state that caused it.
+
+Every business change produces two things at once: a new state, and a record of how it got
+there. Saving them with two separate writes is where systems start to drift apart.
+
+## The shape of the bug
+
+You write an order to the database. Then you publish `OrderPlaced` to Kafka, so the warehouse,
+billing and the email service all hear about it. Two writes, to two systems.
+
+```text
+two writes, two systems
+
+  app --> database   (state saved)
+  app --> broker     (publish failed)
+              |
+          consumer   (no events)
+
+a crash between the writes: the database and the broker disagree
+```
+
+The bug is the gap between them. The database write succeeds. Then, before the publish, the
+process crashes, the broker connection drops, or the server restarts. Now the database holds an
+order that nothing downstream will ever hear about. Or the reverse: the publish succeeds, the
+database write rolls back, and three services start work on an order that does not exist.
+
+**Retries do not fix it.** Retrying the publish after a successful commit may succeed, or may
+send it twice. Retrying the commit after a successful publish may succeed, or may publish twice.
+Nothing turns two writes to two systems into one step, short of a distributed transaction, and
+nobody runs those between a database and a broker.
+
+## The shape of the fix
+
+Write the event to *the same database, in the same transaction* as the business row. Let
+something else carry it to the broker afterwards, by reading the database.
+
+```text
+one write, plus the outbox
+
+  app
+   |
+  database, one transaction:  [ state ] [ events ]
+   |
+  broker   (later, by reading the events table)
+   |
+  consumer
+```
+
+The outbox is an ordinary table in your application's database. The event row is inserted in the
+same transaction as the state change, so the two land together or not at all. Something else then
+sends them on: a job inside your service that reads the table, or a change-data-capture tool such
+as Debezium, which follows the database's own log of changes.
+
+The dual write is gone. The only thing that has to keep the two consistent is the database, and
+that is what database transactions are for.
+
+## Why the framework does it
+
+The pattern is well known, and many teams add it by hand: an `events` table, a rule that every
+transaction writes to it, a poller. It works, and you carry the rule forever. Every new piece of
+code has to remember it. Every review has to check it. The day someone forgets, you have a silent
+dual write, and nobody notices until a downstream system is visibly wrong.
+
+In ekbatan, the executor writes the event rows for every action, at every commit. Your code stages
+a deposit; the executor opens the transaction, writes the `wallets` row, writes the matching
+`WalletMoneyDepositedEvent` row to `eventlog.events`, and commits. **You never write to the event
+table, so there is nothing to remember.**
+
+An action has no way to save a business row without its event rows: staging is the only way an
+action saves anything, and the executor writes both. One honest limit: a repository's own `add`
+and `update` methods can still write a row directly, outside any action, and they write no event.
+They are there for the rare write that is not a business change. Business changes go through
+actions.
+
+## The one place it comes back
+
+Later on, your data may be split over several databases, called shards. An action that writes to
+two shards at once is a dual write again: two databases, two commits, nothing tying them together.
+That is why such an action is refused unless you allow it. See [Adding a shard](/learn/sharding/)
+and [Sagas](/learn/sagas/).
+
+## See also
+
+- [The outbox](/learn/outbox/): the table that makes one write enough
+- [Consuming events](/learn/consuming-events/): what reads it afterwards
+- [Sagas](/learn/sagas/): work that does not fit in one transaction
+- Reference: [`events`](/reference/tables/events/), the table this page argues for, column by
+  column
+- Reference: [Action](/reference/action/), the two steps that make the single write the only way

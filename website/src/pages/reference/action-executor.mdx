@@ -1,0 +1,362 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: ActionExecutor
+activeSection: reference
+lead: "What your code calls to run an action. It runs perform(), then writes everything the action staged, with its events, in one transaction per shard. Application code calls execute() with the action's type and its params, and never calls perform() itself."
+---
+
+import ModeTabs from "../../components/ModeTabs.astro";
+
+You build one executor when the service starts, and every request uses it:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let wallet = executor.execute::<WalletDepositMoneyAction>(Some("alice"), params)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let wallet = executor.execute::<WalletDepositMoneyAction>(Some("alice"), params).await?;
+```
+
+</div>
+</ModeTabs>
+
+The action type goes in the turbofish (`::<...>`). The arguments are the principal (who is
+acting, or `None`) and the action's params.
+
+## Type signature
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+// ekbatan::blocking::ActionExecutor
+impl ActionExecutor {
+    pub fn builder() -> ActionExecutorBuilder;
+
+    pub fn execute<A: AsyncAction>(
+        &self,
+        principal: Option<&str>,
+        params: A::Params,
+    ) -> Result<A::Result, Error>;
+
+    pub fn execute_with<A: AsyncAction>(
+        &self,
+        principal: Option<&str>,
+        params: A::Params,
+        execution_configuration: &ExecutionConfiguration,
+    ) -> Result<A::Result, Error>;
+
+    pub fn namespace(&self) -> &str;
+    pub fn as_async(&self) -> &AsyncActionExecutor;
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+// ekbatan::aio::AsyncActionExecutor
+impl AsyncActionExecutor {
+    pub fn builder() -> AsyncActionExecutorBuilder;
+
+    pub async fn execute<A: AsyncAction>(
+        &self,
+        principal: Option<&str>,
+        params: A::Params,
+    ) -> Result<A::Result, Error>;
+
+    pub async fn execute_with<A: AsyncAction>(
+        &self,
+        principal: Option<&str>,
+        params: A::Params,
+        execution_configuration: &ExecutionConfiguration,
+    ) -> Result<A::Result, Error>;
+
+    pub fn namespace(&self) -> &str;
+}
+
+// and one public field: `pub event_persister: Arc<dyn EventPersister>`
+```
+
+</div>
+</ModeTabs>
+
+`execute` uses the executor's default configuration. `execute_with` uses the one you pass, for
+this call only (see [Retries](#retries) and [Cross-shard](#cross-shard)).
+
+Both executors take any `AsyncAction`, and every blocking `Action` is one too. So **both run
+both kinds**. The blocking `ActionExecutor` is the async one underneath: its `execute` waits on
+it with [`block_on`](/reference/runtime/blocking-and-async/). `as_async()` gives you that async
+executor, and `ActionExecutor::from(async_executor)` wraps one you already have.
+
+`execute` takes the action's **type** and runs the instance registered for it. The code that
+calls it needs only the type and the params, not an action built with its repositories. A type
+that was never registered is refused with `Error::Invalid`, before anything runs.
+
+## Building one
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let executor = ActionExecutor::builder()
+    .namespace("example.wallet")
+    .database_registry(registry.clone())
+    .action_registry(
+        ActionRegistry::builder()
+            .with_action(WalletCreateAction::new(clock.clone()))
+            .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+            .with_action(WalletCloseAction::new(wallets.clone()))
+            .build(),
+    )
+    .repository_registry(
+        RepositoryRegistry::builder()
+            .with_repository(wallets.clone())
+            .with_repository(Arc::new(NotificationRepository::new(registry.clone())))
+            .build(),
+    )
+    .clock(clock)
+    .build()?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let executor = AsyncActionExecutor::builder()
+    .namespace("example.wallet")
+    .database_registry(registry.clone())
+    .action_registry(
+        ActionRegistry::builder()
+            .with_action(WalletCreateAction::new(clock.clone()))
+            .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+            .with_action(WalletCloseAction::new(wallets.clone()))
+            .build(),
+    )
+    .repository_registry(
+        RepositoryRegistry::builder()
+            .with_repository(wallets.clone())
+            .with_repository(Arc::new(NotificationRepository::new(registry.clone())))
+            .build(),
+    )
+    .clock(clock)
+    .build()?;
+```
+
+</div>
+</ModeTabs>
+
+| builder method | |
+|---|---|
+| `namespace(...)` | **Required.** Written into every event row. It has a fixed shape, below |
+| `database_registry(Arc<DatabaseRegistry>)` | **Required.** The shards: where each staged row is written |
+| `action_registry(ActionRegistry)` | **Required.** The actions this executor can run |
+| `repository_registry(RepositoryRegistry)` | **Required.** Which repository writes each staged type |
+| `event_persister(Arc<dyn EventPersister>)` | What writes the event rows. Default: `SingleTableJsonEventPersister`. See [below](#custom-event-persister) |
+| `clock(Arc<dyn Clock>)` | Stamps the event rows' dates. Default: `SystemClock`, the wall clock in UTC |
+| `default_execution_configuration(...)` | What `execute` uses. Default: one retry of a stale record after 100 ms, and cross-shard refused |
+
+`build()` returns `Result`. A missing required part is `Error::Invalid` naming it, so the mistake
+shows where the executor is built, not at the first call.
+
+**The namespace** goes into every event row, and downstream it becomes the start of topic and
+schema package names. It must be dot-separated identifiers: letters, digits and `_`, each part
+starting with a letter or `_`. `my-service` is refused, because a hyphen is not legal in a
+protobuf package or an Avro namespace. Write `my_service`.
+
+Give the executor the same clock as your actions. The actions' clock dates the models, the
+executor's dates the event rows; nothing checks they are the same.
+
+## What one call does
+
+1. Finds the registered action, or returns `Error::Invalid`.
+2. Makes a new `ActionPlan` and runs `perform()` on it. An `Err` stops here; nothing is written.
+3. Writes the params as JSON. They must be a JSON object, or `Error::Invalid`.
+4. Groups the staged rows by shard, using each repository's sharding strategy. Two shards without
+   permission: `Error::CrossShard`, nothing written.
+5. On each shard, in one transaction: the staged INSERTs and UPDATEs, then the event rows.
+   Then `COMMIT`.
+6. On an error that a retry policy matches, waits and goes back to step 2.
+
+## What "one transaction" holds
+
+One transaction, on one shard, holding:
+
+- every staged INSERT for that shard, one multi-row statement per type;
+- every staged UPDATE for that shard, one statement per type, each row matched on its id
+  **and** its version, which it raises by one;
+- one event row per event. An action that emitted no events still writes one row, with the event
+  columns empty, so the event log records every action that ran.
+
+They commit together or not at all. If an UPDATE finds a row at another version, or the event
+rows can't be written, the transaction rolls back with everything in it.
+
+A call that staged nothing writes its one event row on the default shard.
+
+## Retries
+
+The default: a call that fails with a stale record (`Error::StaleRecord` or
+`Error::StaleRecords`: it lost a race with another write to the same row) is tried once more,
+after 100 ms.
+
+```rust
+// ekbatan::action
+impl ExecutionConfiguration {
+    pub fn builder() -> ExecutionConfiguration;              // starts from the default
+    pub fn with_retry(self, on: RetryOn, config: RetryConfig) -> Self;
+    pub fn retry_configs(self, retry_configs: Vec<(RetryOn, RetryConfig)>) -> Self;
+    pub fn no_retry(self) -> Self;
+    pub fn allow_cross_shard(self, allow_cross_shard: bool) -> Self;
+    pub fn build(self) -> ExecutionConfiguration;
+}
+
+impl RetryConfig {
+    pub fn new(max_retries: u32, delay: Duration) -> Self;
+}
+
+impl RetryOn {
+    pub fn stale_record() -> Self;                           // StaleRecord, StaleRecords
+    pub fn error<E: std::error::Error + 'static>() -> Self;  // an E anywhere in the chain
+}
+```
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let config = ExecutionConfiguration::builder().with_retry(
+    RetryOn::error::<Flaky>(),
+    RetryConfig::new(2, Duration::from_millis(1)),
+);
+executor.execute_with::<FailsTwice>(None, params, &config)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let config = ExecutionConfiguration::builder().with_retry(
+    RetryOn::error::<Flaky>(),
+    RetryConfig::new(2, Duration::from_millis(1)),
+);
+executor.execute_with::<FailsTwice>(None, params, &config).await?;
+```
+
+</div>
+</ModeTabs>
+
+- **`builder()` starts from the default**, so `with_retry` adds to the stale-record policy. It
+  replaces a policy for the same kind of failure. `retry_configs(...)` replaces them all.
+  `no_retry()` removes them all, the default one included.
+- **`max_retries` counts the tries after the first.** `0` turns that policy off; `2` allows three
+  attempts.
+- **The delay is fixed.** The same `delay` before every retry, no backoff.
+- **Any failure can be retried**: one from `perform()` or one from the writes.
+- **The chain is searched.** The error is checked first, then each error in its `source()`
+  chain. At each step the policies are tried in order, and the first that matches is used. So
+  `RetryOn::error::<Flaky>()` matches `Error::action(Flaky)`, and a policy for a driver's error
+  type matches the `sqlx::Error` inside `Error::Database`.
+- **A retry starts from phase one**, with a fresh plan. `perform()` runs again.
+- When no policy matches, or the retries are used up, the last error is returned.
+
+## Cross-shard
+
+By default, an action whose staged rows land on more than one shard is **refused** with
+`Error::CrossShard`, before anything is written. It names two of the shards.
+
+To allow it, pass a configuration on the one call that needs it:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let allow = ExecutionConfiguration::builder().allow_cross_shard(true);
+executor.execute_with::<OpenOnBothShards>(None, params, &allow)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let allow = ExecutionConfiguration::builder().allow_cross_shard(true);
+executor.execute_with::<OpenOnBothShards>(None, params, &allow).await?;
+```
+
+</div>
+</ModeTabs>
+
+Each shard then commits on its own, one after the other, and **there is no two-phase commit**.
+If one shard fails, only that shard rolls back. The shards that already committed stay
+committed. All of the call's event rows share one `action_id`, so they can be matched up later.
+
+What the executor does about it:
+
+- **A warning is logged before the first commit**, naming the shards.
+- **A partial failure is logged at ERROR**, on a line starting `CRITICAL:`, naming the shards
+  that committed and the one that failed.
+- **The span says so**: `ekbatan.shard.cross_shard` on `ekbatan.action.persist`, and on a partial
+  failure `ekbatan.shard.partial_commit_failure`, `ekbatan.shard.committed_shards` and
+  `ekbatan.shard.failed_shard`.
+
+That alarm fires when a shard's write or commit **returns an error**. It does not fire if the
+call stops in some other way between two commits: a panic, or an async call whose future is
+dropped (a cancelled request, a timeout). The shards already committed stay committed, and
+nothing is logged about it.
+
+Prefer allowing it per call, where the risk is visible, not as the executor's default. If a
+partial commit would need undoing, write a [saga](/learn/sagas/) instead.
+
+## Custom event persister
+
+The default persister, `SingleTableJsonEventPersister`, writes one JSON row per event into
+[`eventlog.events`](/reference/tables/events/). You can give the executor your own, to write
+another shape. It is called once per shard, inside that shard's transaction, after the staged
+rows:
+
+```rust
+// ekbatan::action::EventPersister
+pub trait EventPersister: Send + Sync {
+    fn persist_action_events<'a>(
+        &'a self,
+        tx: &'a mut AsyncTransaction,
+        namespace: &'a str,
+        action_name: &'a str,
+        started_date: Instant,
+        completion_date: Instant,
+        action_params: &'a str,
+        model_events: &'a [EmittedEvent<'a>],
+        shard: ShardIdentifier,
+        action_event_id: Uuid,
+    ) -> BoxFuture<'a, Result<(), Error>>;
+}
+```
+
+Write through `tx.db()`, so what you write commits with the action's rows or not at all. An
+`Err` rolls the whole shard back. `EmittedEvent` holds the event and the id and type name of
+the model it came from. `event_payload(&emitted)` gives the payload JSON the default persister
+writes.
+
+The executor's persister is public, for code outside an action, such as a backfill writing
+events for old rows: `executor.event_persister` on the async executor,
+`executor.as_async().event_persister` on the blocking one.
+
+## Tracing and logs
+
+Every call is an `ekbatan.action.execute` span, with `ekbatan.action.perform`,
+`ekbatan.action.persist` and one `ekbatan.transaction` span per shard inside it. The crate uses
+the OpenTelemetry API only: with no SDK installed, these do nothing. The executor's log lines -
+executing, completed, retrying, failed - are `tracing` events. See
+[Observability](/reference/runtime/observability/).
+
+## See also
+
+- [Action](/reference/action/) · [ActionPlan](/reference/action-plan/)
+- [`events`](/reference/tables/events/) - what it writes
+- [Blocking and async](/reference/runtime/blocking-and-async/)
+- [Observability](/reference/runtime/observability/)

@@ -1,0 +1,137 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: The outbox
+activeSection: learn
+description: "How domain rows and event rows commit together, so the database holds both the state and the fact that produced it, and the ways to use the events afterwards."
+lead: "How domain rows and event rows commit together, so the database holds both the state and the fact that produced it, and the ways to use the events afterwards."
+---
+
+import LearnPager from "../../components/LearnPager.astro";
+
+Every action's commit is one database transaction. It touches as many business tables as the
+action needs, **plus** the event table. They land together, or none of them do.
+
+```
+┌──────────────────  ONE DATABASE TRANSACTION  ──────────────────────┐
+│   wallets (UPDATE)   notifications (INSERT)   events (INSERT)      │
+└────────────────────────────────────────────────────────────────────┘
+                                │
+       commit (every row is saved)  —or—  rollback (none of them is)
+```
+
+There is no publish to a broker inside the request, and no retry loop trying to keep two systems
+in step. After the commit, the rows in the event table are the record of what happened. Anything
+that publishes or handles events does it later, by reading them.
+
+## How rows get there
+
+Every row arrives the same way:
+
+```text
+a model method
+  -> returns a new model
+  -> with one or more events attached
+
+the action's perform()
+  -> reads the current state
+  -> calls the model method
+  -> stages the new model on the plan
+
+the executor
+  -> opens one database transaction
+  -> writes the business rows
+  -> writes the attached events to eventlog.events
+  -> commits, or rolls back all of it
+```
+
+For a wallet deposit, the first step is:
+
+```rust
+pub fn deposit(&self, amount: Decimal) -> Result<Wallet, Error> {
+    if amount <= Decimal::ZERO {
+        return Err(Error::Invalid("Deposit amount must be positive".to_owned()));
+    }
+    let new_balance = self.balance + amount;
+    self.copy()
+        .with_event(WalletMoneyDepositedEvent {
+            amount,
+            new_balance,
+        })
+        .balance(new_balance)
+        .build()
+}
+```
+
+The event is attached **before** anything is saved, and written **after**. In between it waits on
+the action's plan and touches nothing. Only the executor writes it, and only in the same
+transaction as the wallet row.
+
+**That is the point:** your code makes the facts; the framework saves each fact in the same
+transaction as the state it describes. An action cannot do one half without the other, because
+neither half is a call it makes.
+
+## What an event row holds
+
+An event row is not "a Kafka message stored in SQL". It is a committed fact, with enough around
+it for a reader to know where it came from:
+
+- which action committed it (`action_name`, `action_id`), when it started and finished, and its
+  parameters as JSON (`action_params`);
+- which model the event is about (`model_id`, `model_type`);
+- the event's type, its struct name (`event_type`, such as `WalletMoneyDepositedEvent`);
+- the event itself, as JSON (`payload`).
+
+Every row of one action has the same `action_id`, so a reader can group them.
+
+An action that emits no events still writes **one row**, with the model and event columns empty.
+The action happened, and that is worth keeping. A reader skips those rows with
+`event_type IS NULL`. Saving an entity is such an action: entities emit no events.
+
+The action's parameters are stored as they were passed. Keep secrets out of them.
+
+The table is `eventlog.events`, and you never write to it yourself. On PostgreSQL `eventlog` is a
+schema; on MySQL and MariaDB it is a database of its own, on the same server. Your
+app's first migration creates it, as the examples' `V0001__eventlog.sql` does. All columns, for each database: [`events`](/reference/tables/events/).
+
+The table layout and the event JSON are the same as Ekbatan for Java's, so a Java service, or
+tooling built for Java's event table, can read rows written by ekbatan-rs.
+
+## What happens after commit
+
+The event table is **just a table**. Anything that can read it can use it.
+
+**In your service.** The local event handler runs your code for each event, with retries and an
+expiry. Two jobs do the work: one copies each new event that has a handler into a table of pending
+deliveries, one row per handler, and marks the event `delivered`; the other runs the handlers. They run once at a
+time across all your service's instances, coordinated through the database. No broker, nothing
+else to run. See [Consuming events](/learn/consuming-events/) and
+[Local event handler](/reference/events/local-event-handler/).
+
+**To a broker.** A handler is your code, so it can publish to Kafka or RabbitMQ itself. Or a
+change-data-capture tool such as Debezium can follow the table and publish its rows. ekbatan-rs
+ships nothing for change data capture; the table is an ordinary table, which is what makes it
+possible. If you run both, the tool also sees the local handler's `delivered` updates as changes;
+drop them in your pipeline.
+
+Every path delivers **at least once**. A handler can see the same event twice, so handling a
+repeat must be harmless.
+
+## One trap worth knowing
+
+Rows have no position of their own. Every row of one action gets the same `event_date`: the time
+the action finished. Between actions, `event_date` is the only order. With a real clock that is
+fine. A test that freezes its clock gives every row of a run the same time, so their order is
+effectively random: find a row by its `action_name`, `action_id` or `model_id`, not by its place
+in a list.
+
+<LearnPager current="outbox" />
+
+## See also
+
+- [Your first action](/learn/your-first-action/): where a row in this table comes from, read
+  back from a real run
+- [Consuming events](/learn/consuming-events/): the ways to use it
+- [The dual-write trap](/learn/the-dual-write-trap/): why one table instead of two systems
+- Reference: [`events`](/reference/tables/events/),
+  [`event_notifications`](/reference/tables/event-notifications/),
+  [Local event handler](/reference/events/local-event-handler/)

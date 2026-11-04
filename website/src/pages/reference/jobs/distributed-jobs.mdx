@@ -1,0 +1,276 @@
+---
+layout: ../../../layouts/DocLayout.astro
+title: Distributed jobs
+activeSection: reference
+lead: "DistributedJob and JobRegistry: background work that runs once per slot across a cluster - on a schedule, on one instance of your service rather than on all of them. The schedule and the claim live in one database table."
+---
+
+## Defining a job
+
+A job is a type with three methods. Blocking, from the job worker example:
+
+```rust
+use std::time::Duration;
+use ekbatan::blocking::{DistributedJob, Repository};
+use ekbatan::distributed_jobs::{ExecutionContext, Schedule};
+use ekbatan::Error;
+
+pub struct WalletReportJob {
+    wallets: Arc<WalletRepository>,
+}
+
+impl DistributedJob for WalletReportJob {
+    fn name(&self) -> String {
+        "wallet-report".to_owned()
+    }
+
+    fn schedule(&self) -> Schedule {
+        Schedule::fixed_delay(Duration::from_secs(5))
+    }
+
+    fn execute(&self, _ctx: &ExecutionContext) -> Result<(), Error> {
+        let wallets = self.wallets.find_all()?;
+        let total: Decimal = wallets.iter().map(|w| *w.balance()).sum();
+        tracing::info!("{} wallets, total balance = {total}", wallets.len());
+        Ok(())
+    }
+}
+```
+
+Async, the same with `AsyncDistributedJob` and an `async fn execute`:
+
+```rust
+use ekbatan::aio::AsyncDistributedJob;
+
+impl AsyncDistributedJob for WalletReportJob {
+    fn name(&self) -> String {
+        "wallet-report".to_owned()
+    }
+
+    fn schedule(&self) -> Schedule {
+        Schedule::fixed_delay(Duration::from_secs(5))
+    }
+
+    async fn execute(&self, _ctx: &ExecutionContext) -> Result<(), Error> {
+        let wallets = AsyncRepository::find_all(&*self.wallets).await?;
+        // ...
+        Ok(())
+    }
+}
+```
+
+- `name()` is the job's id across the cluster: the key of its row in
+  [`scheduled_tasks`](/reference/tables/scheduled-tasks/). Keep it the same on every instance and
+  across deploys. It is asked once, when the job is added to the registry.
+- `schedule()` says when it runs. Also asked once.
+- `execute(ctx)` is the work. `Ok(())` is a success; an `Err` is a failure.
+
+A blocking `DistributedJob` is also an `AsyncDistributedJob`, so both kinds go into the same
+registry. A blocking job runs on a runtime thread that is first moved out of the way of async
+work (tokio's `block_in_place`), so it needs a multi-threaded tokio runtime - the blocking API's
+own runtime is one.
+
+Nothing about being a job makes the work special. A job that changes data does it through an
+ordinary action, so the event rows it writes look exactly like ones written during a request.
+From the worker example, depositing into each wallet under its keyed lock:
+
+```rust
+fn execute(&self, _ctx: &ExecutionContext) -> Result<(), Error> {
+    for wallet in self.wallets.find_open_with_balance_below(THRESHOLD)? {
+        let id = *wallet.id();
+        let deposited = self
+            .locks
+            .acquire(&format!("wallet:{}", id.uuid()), Duration::from_secs(10))
+            .and_then(|_lease| {
+                self.executor.execute::<WalletDepositMoneyAction>(Some("wallet-stipend-job"), params(id))
+            });
+        if let Err(e) = deposited {
+            tracing::warn!("deposit failed for wallet {} - skipping: {e}", id.uuid());
+        }
+    }
+    Ok(())
+}
+```
+
+## Schedules
+
+| | runs |
+| --- | --- |
+| `Schedule::fixed_delay(Duration)` | first when the job's row is written, then that long after each run **ends** |
+| `Schedule::daily([NaiveTime, ...])` | at each of these times of day, **in UTC**. At least one time (an empty list panics) |
+| `Schedule::disabled()` | never. The job is registered but writes no row |
+
+```rust
+use chrono::NaiveTime;
+
+Schedule::daily([NaiveTime::from_hms_opt(2, 0, 0).unwrap()]) // 02:00 UTC every day
+```
+
+There is no cron expression.
+
+**A job runs when it is due *and* the scheduler polls.** Polling is every 10 seconds by default,
+so a job due at 12:00:00 may start at 12:00:09, and a 2-second fixed delay runs about every 10
+seconds. The job worker example polls every second for that reason
+(`"jobs": { "pollingInterval": "PT1S" }`).
+
+## How instances share the work
+
+- Every instance polls `scheduled_tasks` for rows that are due.
+- When a slot comes due, **exactly one instance wins the claim** - one
+  `UPDATE ... WHERE version = ?`, which only one instance's update can match - and runs it.
+- While it runs, that instance stamps the row's heartbeat. If the heartbeat goes stale, another
+  instance makes the row due again **and runs the job again**, while the first may still be part
+  way through `execute()`.
+- A job that returns `Err` is logged, its row's `consecutive_failures` goes up, and it is
+  rescheduled **by its schedule**, as after a success. There is no extra backoff.
+  `consecutive_failures` is the column to alert on.
+
+**The claim is per slot.** If every instance is down when a slot comes due, the next instance to
+poll runs it, once. One instance never runs the same job twice at the same time.
+
+Tested on PostgreSQL, MySQL and MariaDB (`wallet-example/tests/distributed_jobs.rs`): two
+instances, a 1-second job, 8 seconds - 8 runs, no slot twice; failure counting, dead revival,
+takeover, a stop that waits for a running job, and a missing table failing `start()`.
+
+### The rule every job has to obey
+
+**A slot can run twice.** The claim protects the row, not your code. An instance that was taken
+over does not record its result, but it cannot undo what it already did.
+
+Write `execute()` so that running the same slot twice is harmless: an insert that ignores a
+duplicate, an update whose `WHERE` checks the state it expects, an idempotency key on an outside
+call. The worker example re-reads the balances on each run, and its deposit is guarded by the
+keyed lock and the version check.
+
+### Stopping before you are taken over
+
+An execution is declared dead after **60 seconds** without a heartbeat (heartbeat interval 10s x
+6). The instance being replaced is **not told and not interrupted**. The heartbeat is written by
+its own loop, so a slow job keeps its row alive; what stops the heartbeat is that loop failing to
+reach the database - a pool with no free connection, or a database that will not take the write.
+
+A job that loops over many items can check its own heartbeat:
+
+```rust
+fn execute(&self, ctx: &ExecutionContext) -> Result<(), Error> {
+    for invoice in self.invoices()? {
+        // 0.0 just after a good heartbeat, 1.0 when another instance may take the row over
+        if ctx.heartbeat_state().fraction_dead() > 0.5 {
+            tracing::warn!("heartbeats failing; stopping before another instance takes over");
+            return Ok(());
+        }
+        self.send(invoice)?;
+    }
+    Ok(())
+}
+```
+
+Returning early counts as a normal run; the rest is picked up next time. This only shortens the
+overlap. A job that is safe to run twice is the only complete answer.
+
+### What `ExecutionContext` gives a job
+
+| | |
+| --- | --- |
+| `task_name()` | the job's name |
+| `execution_time()` | the slot this run was due at |
+| `is_shutting_down()` | whether the registry is stopping. A job that loops should end its loop |
+| `sleep(duration).await` | sleeps, or wakes early when the registry starts stopping. From blocking code: `ekbatan::blocking::block_on(ctx.sleep(d))` |
+| `heartbeat_state().fraction_dead()` | how close the run is to being declared dead |
+
+## Wiring
+
+From the sharded example:
+
+```rust
+use ekbatan::distributed_jobs::{JobRegistry, JobsConfig};
+
+let jobs_config = match &config.jobs {
+    Some(section) => JobsConfig::from_value(section)?,
+    None => JobsConfig::default(),
+};
+let jobs = JobRegistry::builder()
+    .connection_provider(pool_for("jobsConfig")?) // a pool of its own
+    .jobs_config(&jobs_config)
+    .with_job(WalletReportJob::new(wallets.clone()))
+    .with_job(WalletStipendJob::new(executor.clone(), locks, wallets.clone()))
+    .build()?;
+jobs.start().await?;
+// ...
+jobs.stop().await;
+```
+
+`start()` and `stop()` are async only; from blocking code, `block_on(jobs.start())?` and
+`block_on(jobs.stop())`. `start()` must run inside a tokio runtime: it starts the polling and
+heartbeat tasks there. The local event handler's two jobs are added here too - they are
+distributed jobs. See [Local event handler](/reference/events/local-event-handler/#wiring).
+
+**`build()` refuses**: no pool, no job, a blank job name, two jobs with the same name, a zero
+polling or heartbeat interval, and a missed-heartbeats limit below 4.
+
+**`start()`** writes each job's row if it has none, then checks that every enabled job has one. A
+missing `scheduled_tasks` table, or a pool that cannot write to it, fails here with a message
+that says so, rather than leaving jobs that never run.
+
+### The settings
+
+| builder method | `ekbatan.jobs` key | default | what it controls |
+| --- | --- | --- | --- |
+| `poll_interval(d)` | `pollingInterval` | 10s | how often each instance asks for due work, and so how late a job may start |
+| `heartbeat_interval(d)` | `heartbeatInterval` | 10s | how often a running job's row is stamped |
+| `missed_heartbeats_limit(n)` | - | 6 (at least 4) | heartbeats missed before a run is declared dead |
+| `shutdown_max_wait(d)` | `shutdownMaxWait` | 30 minutes | how long `stop()` waits for running jobs |
+| `clock(c)` | - | `SystemClock` | the clock the schedule and the heartbeat use |
+
+A run is declared dead after `heartbeat_interval x missed_heartbeats_limit`: 60 seconds on the
+defaults. The short window is on purpose: the local event handler runs on two jobs, and a job is
+a single row, so a crashed instance freezes that job until its row is revived. Lengthen it if
+your jobs run long and a second run costs more than a delay.
+
+### Give the jobs a pool of their own
+
+The registry polls all the time and stamps heartbeats from its own loop. On the request pool, a
+burst of traffic could starve the heartbeat, and a starved heartbeat means a job runs twice. So
+the examples build the registry on the shard member's `jobsConfig` pool. Size it for the
+polling, the heartbeats, and whatever your jobs do on that pool; jobs that write through the
+executor use the executor's pools, not this one.
+
+**There is no worker limit.** Each run is a tokio task of its own, so every due job starts as
+soon as it is claimed. A job never runs twice at once on one instance.
+
+## Stopping
+
+`stop()`:
+
+1. stops polling, and tells running jobs the registry is stopping (`is_shutting_down()`,
+   `sleep()` waking early);
+2. waits for running jobs, **once**, up to `shutdown_max_wait`;
+3. abandons a job still running after that, with a warning. Its row stays claimed with a frozen
+   heartbeat, and another instance revives it after the dead-run window, as after a crash.
+
+An async job is stopped at its next `.await`. A blocking job cannot be interrupted; it runs on to
+its end.
+
+**Nothing stops the registry for you.** There is no signal handling: call `stop()` from your own
+shutdown path. The examples do it after Ctrl-C (and SIGTERM in the worker): running jobs finish,
+then the pools close.
+
+**A panic is a failed run.** A panic in `execute()` is caught and treated as an `Err`: the run
+is recorded as failed (`consecutive_failures` goes up), the row is released, and the job runs
+again at its next slot. Still, return an `Err` for anything that can fail and keep panics for
+bugs.
+
+## The `scheduled_tasks` table
+
+One row per job. The row *is* the coordination, not a log of it: the next due time, which
+instance holds the job, and its heartbeat. The layout is db-scheduler's, unchanged; its
+PostgreSQL time columns are `timestamp with time zone`. See
+[`scheduled_tasks`](/reference/tables/scheduled-tasks/) for the DDL and every column.
+
+## See also
+
+- [`scheduled_tasks`](/reference/tables/scheduled-tasks/) - the table, and what happens to a row
+- [Local event handler](/reference/events/local-event-handler/) - two jobs on this registry
+- [Config files](/reference/config-files/#jobs) - `ekbatan.jobs`
+- [`job-worker-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/job-worker-pg) -
+  a worker with no HTTP at all, on the blocking API

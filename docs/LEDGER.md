@@ -80,7 +80,7 @@ the database), linted, and committed before the next starts.
 | 9b | Blocking and async APIs side by side: `ekbatan::blocking` (`Action`, `ActionExecutor`, `Repository`, `Db`, `Transaction`, locks, jobs, handlers, `ActionSpec`) and `ekbatan::aio` (`Async*`) | py sync API and `ekbatan.aio` | done (EKB-0015..0017) |
 | 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | done (EKB-0019) |
 | 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | done (EKB-0022..0027) |
-| 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | |
+| 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | in progress (see below) |
 
 ## Differences from Java to keep in mind
 
@@ -108,3 +108,16 @@ Web framework: axum. Each example: README, migrations, `ekbatan.json`, schema ge
 | 11e | `job-worker-pg`: no HTTP, blocking jobs once per slot, clean shutdown | done (EKB-0025) |
 | 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | done (EKB-0026) |
 | 11g | `ekbatan-rs-examples/README.md` and a check that the per-database copies stay identical | done (EKB-0022, EKB-0027) |
+
+## Item 12: docs, website, GitHub (ledger)
+
+The user's choices (2026-11-04): a public repo `ekbatan-io/ekbatan-rs`; a website with Astro,
+like Python's; no release workflow yet.
+
+| # | Piece | Status |
+|---|---|---|
+| 12a | Public repo, CI (lint, tests on the three databases, every example) | repo created and pushed (EKB-0028) |
+| 12b | Website scaffold: Python's Astro project (same stack, its pinned npm versions), rebranded for Rust | done (EKB-0035) |
+| 12c | Content: each topic as a `docs/` page and its website page, written together, from the Rust code | done (EKB-0035): 12 Learn + 27 Reference pages, each with its `docs/` twin |
+| 12d | Deploy workflow (GitHub Pages; turning Pages on is a repo setting: ask) | written (EKB-0035); Pages not turned on yet |
+| 12e | Dependency-check workflow (2-week rule, advisories) | written (EKB-0030); not pushed yet |

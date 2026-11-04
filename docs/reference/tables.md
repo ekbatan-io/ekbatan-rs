@@ -1,0 +1,83 @@
+# Framework tables
+
+Which framework tables you need, where they live, and how they get into your database: the tables the framework itself reads and writes, beside your own.
+
+An application has two kinds of table:
+
+- **yours** - `wallets`, `orders`, `notifications`;
+- **the framework's** - written by the action executor or by one of the framework's jobs.
+
+This page is the map of the framework's tables. Each one also has a page of its own, with its DDL
+for each database, column by column.
+
+| table | needed when | written by |
+| --- | --- | --- |
+| [`eventlog.events`](/reference/tables/events/) | always: every action writes to it | the executor, inside the action's transaction |
+| [`eventlog.event_notifications`](/reference/tables/event-notifications/) | only with the [local event handler](/reference/events/local-event-handler/) | the fan-out job creates rows; the handling job updates them |
+| [`scheduled_tasks`](/reference/tables/scheduled-tasks/) | only with [distributed jobs](/reference/jobs/distributed-jobs/), or the local event handler | the job registry |
+
+The local event handler is built on distributed jobs - fan-out and handling *are* jobs - so using
+it means all three tables.
+
+## Do I need each table?
+
+| what you are doing | `events` | `event_notifications` | `scheduled_tasks` |
+| --- | :---: | :---: | :---: |
+| actions only | yes | no | no |
+| a change-data-capture tool (such as Debezium) reading committed events | yes | no | no |
+| the local event handler | yes | yes | yes |
+| distributed jobs only, with no actions | no | no | yes |
+| your own `EventPersister` that writes somewhere else | up to you | no | only with jobs |
+
+`events` belongs to the default event writer, `SingleTableJsonEventPersister`. Give the executor
+your own `EventPersister` (`event_persister(...)` on its builder) and where the events go is
+yours to decide. What you cannot change is *when* they are written: inside the action's
+transaction, which is what makes the rows and their events commit together.
+
+## Where they live
+
+**The two event tables have fixed names, in a fixed place.** You never pass them to the
+framework: the executor, the fan-out job and the handling job name them themselves.
+
+| database | the two event tables |
+| --- | --- |
+| PostgreSQL | `eventlog.events`, `eventlog.event_notifications` - a schema of their own, in each database |
+| MySQL, MariaDB | `eventlog.events`, `eventlog.event_notifications` - a database of their own, **one per server** |
+
+`scheduled_tasks` sits in your own schema or database, beside your tables, under that name.
+
+On MySQL and MariaDB a schema *is* a database, so `eventlog` is a database of its own, beside
+yours. Your first migration creates it, and the login needs the right to create it and to use
+it. Every database on one server shares that `eventlog`, so give each shard a server of its own.
+See [Multi-database](/reference/multi-database/#schema-and-database).
+
+## Getting them into your database
+
+They come from **your own migration files**. The framework has no DDL helper: copy the files from
+the examples - `wallet-example/migrations/postgres`, `.../mysql` and `.../mariadb`, or any example
+in `ekbatan-rs-examples` - and keep them with your own:
+
+```
+migrations/
+  V0000__create_eventlog_database.sql   # MySQL and MariaDB only: CREATE DATABASE IF NOT EXISTS eventlog;
+  V0001__eventlog.sql                   # eventlog.events, eventlog.event_notifications, their indexes
+  V0002__scheduled_tasks.sql            # db-scheduler's table, as it is
+  V0003__wallets.sql                    # your own tables
+```
+
+Three files rather than one, because they change for different reasons: the framework's when you
+upgrade it, yours whenever your domain changes. The table pages have each file's DDL.
+
+These are the same table layouts as Ekbatan for Java's, so its migration files for these tables
+copy over too.
+
+The [migrator](/reference/migrations/) applies the same files to every shard, so each shard has
+its own copy of all three tables (on MySQL and MariaDB, each server). The
+[schema generator](/reference/schemagen/) leaves all three out of the module it writes: the
+framework reads and writes them itself.
+
+## See also
+
+- [The outbox](/learn/outbox/) - why `events` exists
+- [Migrations](/reference/migrations/) - how they get created
+- [Multi-database](/reference/multi-database/) - where the databases disagree

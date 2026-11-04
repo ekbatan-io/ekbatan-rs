@@ -1,0 +1,165 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: ModelEvent
+activeSection: reference
+lead: "An event is a record that something happened to a model: opened, deposited, closed. A model carries the events of its change, and each one becomes a row in eventlog.events when the action commits. #[model_event] turns a plain struct into one."
+---
+
+## Declaring an event
+
+```rust
+use ekbatan::model_event;
+
+#[model_event(Wallet)]
+pub struct WalletMoneyDepositedEvent {
+    pub amount: Decimal,
+    pub new_balance: Decimal,
+}
+```
+
+`#[model_event(Wallet)]` names the model the event belongs to. It writes:
+
+- `#[derive(Clone, Debug, Serialize, Deserialize)]`, with serde's
+  `#[serde(rename_all = "camelCase")]`. Don't derive these yourself.
+- `impl AnyModelEvent`: what every event can do, whatever its model.
+- `impl ModelEvent<Wallet>`: what lets `with_event` on a `Wallet` take it.
+
+The struct can't have generic parameters. Its field types must implement serde's `Serialize`
+and `Deserialize`. Your app needs no serde dependency for the derive itself: the macro uses the
+one inside `ekbatan`.
+
+The event holds only its own fields. It has no model id: the event log takes the id and the type
+name from the model the event is attached to.
+
+**An event with no fields needs braces**:
+
+```rust
+#[model_event(Wallet)]
+pub struct WalletClosedEvent {}
+```
+
+A unit struct (`pub struct WalletClosedEvent;`) is written as JSON `null`, and the write is
+refused with `Error::Invalid`: an event must be a JSON object.
+
+```rust
+// ekbatan::AnyModelEvent
+pub trait AnyModelEvent: fmt::Debug + Send + Sync + 'static {
+    fn event_type(&self) -> &'static str;   // "WalletMoneyDepositedEvent"
+    fn type_path(&self) -> &'static str;    // the full path, module included
+    fn to_json(&self) -> Result<String, Error>;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+```
+
+`ekbatan::event_type_name::<WalletMoneyDepositedEvent>()` gives the same name as `event_type()`,
+from the type alone.
+
+## Writing a good event
+
+Put in it what a reader needs to act on, and nothing else. Name it in the past tense: it
+describes something that already happened.
+
+A request id, a delivery address, a flag: these belong to one run of the action, not to what
+happened to the wallet. Put them in the action's params. They are saved on the same row, and a
+handler reads them from `envelope.action_params`.
+
+## Attaching one
+
+Attach an event inside the model's own method, as part of the change:
+
+```rust
+self.copy()
+    .with_event(WalletMoneyDepositedEvent { amount, new_balance })
+    .balance(new_balance)
+    .build()
+```
+
+`with_event` takes `impl ModelEvent<Wallet>`. An event declared for another model doesn't
+compile there. The model makes the event, the action stages the model, and the executor writes
+both. See [Model: Events](/reference/model/#events).
+
+## How an event becomes a row
+
+```
+wallet.deposit(...)          the new wallet carries the event
+   |
+plan.update(wallet)          the event goes with the wallet
+   |
+the executor commits         one row in eventlog.events per event, same transaction
+```
+
+Each row's columns come from four places:
+
+| column | from |
+|---|---|
+| `namespace` | the executor's namespace |
+| `action_id` | one new UUID per call, the same on every shard the call writes |
+| `action_name` | the action's type name: `WalletDepositMoneyAction` |
+| `action_params` | the action's params, as JSON |
+| `started_date` | the executor's clock, when this attempt began |
+| `completion_date` · `event_date` | the executor's clock, inside the shard's transaction |
+| `model_id` | the id of the model the event is attached to, as text |
+| `model_type` | that model's type name: `Wallet` |
+| `event_type` | the event's type name: `WalletMoneyDepositedEvent` |
+| `payload` | the event as JSON, below |
+| `delivered` | `false` |
+| `id` | a new UUID per row |
+
+So a reader can tell which action and which model an event belongs to without opening the
+payload, and can route on `event_type` without parsing it. Handlers subscribe by `event_type`
+too.
+
+**`event_type` is the struct's name, without its module path.** Renaming the struct changes it,
+and readers subscribed to the old name stop getting it. Two event types with the same name in
+different modules are refused when the second is written (`Error::Invalid`, "Event type simple
+name collision"), because a reader routes on the name alone.
+
+The full list of columns is on [`events`](/reference/tables/events/).
+
+## The payload
+
+```json
+{"modelId":"0193...","modelName":"Wallet","amount":5.50,"newBalance":15.50}
+```
+
+- **`modelId` and `modelName` come first**, then the event's own fields in the order they are
+  declared.
+- **Keys are camelCase**: `new_balance` is written `newBalance`. A struct nested inside an event
+  keeps its own field names, unless you give it `#[serde(rename_all = "camelCase")]` too.
+- **A `Decimal` is a JSON number**, with its digits kept: `10.50`, `0.00`, and `1E-7` once the
+  exponent is below -6. Never `-0`.
+- **An `f64` or `f32`** is written like `0.1`, `1.0`, `1.0E20`, `1.234E-5`.
+- **An `Instant`** is ISO-8601 text ending in `Z`.
+- **A `Uuid`** is its text. **An `Id` or `ShardedId`** is `{"id":"...","value":"..."}`, both
+  the same UUID.
+- **An enum** is written by serde's rules: a unit variant `Opened` is `"Opened"`. To write
+  `"OPENED"`, put `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` on the enum.
+
+This is the JSON Ekbatan for Java writes for the same event, checked against values Java wrote:
+a Java service reads these rows, and a Rust one reads Java's. Known gaps, all avoidable:
+
+- **`NaiveDateTime`** is written `.600` where Java writes `.6`. Use `Instant` (UTC).
+- **A `HashMap`** comes out in random order. Use `BTreeMap` (sorted) or an ordered map.
+- **Bytes** come out as an array of numbers, not base64.
+- **A `Decimal`** can't hold more than 28 digits, or a negative scale (`1E+3`).
+
+On MySQL the `payload` and `action_params` columns are of the `JSON` type, which keeps a number
+with a fraction as a double: `10.00` reads back as `10.0`. PostgreSQL's `jsonb` and MariaDB keep
+the digits.
+
+## Reading it back
+
+The derived `Deserialize` reads a payload back into the struct. Keys the struct doesn't declare,
+such as `modelId`, are ignored. A missing key is an error, unless the field is an `Option`.
+
+- **In this service**: a [local event handler](/reference/events/local-event-handler/) gets an
+  `EventEnvelope<WalletMoneyDepositedEvent>`, with the typed event in `.event` and the row's
+  other columns beside it.
+- **By hand**: `EventEntityRepository::find_all(&mut db)` reads the rows as `EventEntity`
+  values, payload as JSON text.
+
+## See also
+
+- [Model](/reference/model/) - what carries events
+- [`events`](/reference/tables/events/) - the table, column by column
+- [Learn: The outbox](/learn/outbox/)

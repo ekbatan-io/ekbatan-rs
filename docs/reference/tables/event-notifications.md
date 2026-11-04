@@ -1,0 +1,190 @@
+# event_notifications
+
+Optional: needed only with the local event handler. One delivery row per event and handler: fan-out turns each event into one row per handler that subscribes to it, so an event with two handlers becomes two rows, with the same event_id and different handler_name.
+
+**Needed when:** you use the [local event handler](/reference/events/local-event-handler/).
+**Written by:** `EventFanoutJob` creates rows; `EventHandlingJob` updates them.
+**Created by:** your migration (`V0001__eventlog.sql` in the examples, beside `events`).
+**Where:** `eventlog.event_notifications`. On PostgreSQL `eventlog` is a schema in each database;
+on MySQL and MariaDB it is a database of its own, one per server. The place is fixed - see
+[Framework tables](/reference/tables/).
+
+Like `events`, it is a plain row shape, not a model or an entity. The handling job updates its
+rows directly as delivery goes on. In code, a row is an `EventNotification`, read and written by
+`EventNotificationRepository`.
+
+## DDL
+
+### PostgreSQL
+
+```sql
+CREATE TABLE eventlog.event_notifications (
+    id              UUID         PRIMARY KEY,
+    event_id        UUID         NOT NULL,
+    handler_name    VARCHAR(255) NOT NULL,
+    namespace       VARCHAR(255) NOT NULL,
+    action_id       UUID         NOT NULL,
+    action_name     VARCHAR(255) NOT NULL,
+    action_params   JSONB        NOT NULL,
+    started_date    TIMESTAMP    NOT NULL,
+    completion_date TIMESTAMP    NOT NULL,
+    model_id        VARCHAR(255),
+    model_type      VARCHAR(255),
+    event_type      VARCHAR(255) NOT NULL,
+    payload         JSONB,
+    event_date      TIMESTAMP    NOT NULL,
+    state           VARCHAR(24)  NOT NULL,
+    attempts        INT          NOT NULL DEFAULT 0,
+    next_retry_at   TIMESTAMP    NOT NULL,
+    created_date    TIMESTAMP    NOT NULL,
+    updated_date    TIMESTAMP    NOT NULL,
+    UNIQUE (event_id, handler_name)
+);
+
+CREATE INDEX event_notifications_due
+    ON eventlog.event_notifications (next_retry_at)
+    WHERE state IN ('PENDING', 'FAILED');
+```
+
+### MySQL
+
+```sql
+CREATE TABLE eventlog.event_notifications (
+    id              CHAR(36)     CHARACTER SET ascii NOT NULL,
+    event_id        CHAR(36)     CHARACTER SET ascii NOT NULL,
+    handler_name    VARCHAR(255) NOT NULL,
+    namespace       VARCHAR(255) NOT NULL,
+    action_id       CHAR(36)     CHARACTER SET ascii NOT NULL,
+    action_name     VARCHAR(255) NOT NULL,
+    action_params   JSON         NOT NULL,
+    started_date    DATETIME(6)  NOT NULL,
+    completion_date DATETIME(6)  NOT NULL,
+    model_id        VARCHAR(255),
+    model_type      VARCHAR(255),
+    event_type      VARCHAR(255) NOT NULL,
+    payload         JSON,
+    event_date      DATETIME(6)  NOT NULL,
+    state           VARCHAR(24)  NOT NULL,
+    attempts        INT          NOT NULL DEFAULT 0,
+    next_retry_at   DATETIME(6)  NOT NULL,
+    created_date    DATETIME(6)  NOT NULL,
+    updated_date    DATETIME(6)  NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (event_id, handler_name)
+);
+
+CREATE INDEX event_notifications_due ON eventlog.event_notifications (next_retry_at);
+```
+
+### MariaDB
+
+As MySQL, with MariaDB's `UUID` type for `id` (`UUID PRIMARY KEY`), `event_id` and `action_id`.
+
+`DATETIME(6)` rather than `DATETIME` matters here: `next_retry_at` is compared with times that
+are not whole seconds.
+
+## Columns
+
+Twelve columns are **copied from the event row** when fan-out creates the delivery row, so a
+handler needs nothing else:
+
+| column | null | meaning |
+| --- | :---: | --- |
+| `event_id` | no | the `events` row this delivery is for |
+| `namespace` | no | copied: the service that emitted the event |
+| `action_id` | no | copied: shared by every row one action wrote |
+| `action_name` | no | copied: what ran |
+| `action_params` | no | copied: the action's input, for anything the event does not carry |
+| `started_date` | no | copied |
+| `completion_date` | no | copied |
+| `model_id` | yes | copied |
+| `model_type` | yes | copied |
+| `event_type` | no | copied. Never null here, unlike in `events`: action rows are never fanned out |
+| `payload` | yes | copied: the event as JSON |
+| `event_date` | no | copied: the event's time |
+
+The rest belong to this table: which handler the row is for, and how its delivery is going.
+
+| column | null | meaning |
+| --- | :---: | --- |
+| `id` | no | this delivery row |
+| `handler_name` | no | the handler's `name()`. **Treat it as part of the schema** - see [below](#handler-names-are-part-of-the-schema) |
+| `state` | no | `PENDING`, `FAILED`, `SUCCEEDED` or `EXPIRED` |
+| `attempts` | no | how many times the handler has run for it |
+| `next_retry_at` | no | the earliest time the handler may run again. Fan-out sets it to the event's `event_date`, so an older event is handled first |
+| `created_date` | no | when fan-out created the row |
+| `updated_date` | no | when it last changed |
+
+## The unique key
+
+`UNIQUE (event_id, handler_name)` means each handler gets each event once. Fan-out writes the
+rows and marks their events delivered in one transaction per shard. If two fan-outs ever work on
+the same events at once, the second one's insert breaks the unique key, its transaction rolls
+back, and no second delivery row is made.
+
+The same idea is worth copying into your own handlers: **to make work safe to repeat, put a
+unique key inside the transaction that does the work.** Checking first in code - "is there a
+row? if not, insert one" - leaves a gap where another process can slip in. A unique key leaves
+none.
+
+## The due index
+
+The handling job reads due rows - `state IN ('PENDING', 'FAILED') AND next_retry_at <= now`,
+oldest `next_retry_at` first - on each shard's primary. On PostgreSQL the index is partial, so
+`SUCCEEDED` and `EXPIRED` rows stay out of it. MySQL and MariaDB have no partial indexes; the
+examples index `next_retry_at` alone there.
+
+## States
+
+| state | meaning |
+| --- | --- |
+| `PENDING` | written by fan-out; not tried yet |
+| `FAILED` | the handler failed, and another try is still inside the retention window |
+| `SUCCEEDED` | final. The handler returned `Ok` |
+| `EXPIRED` | final. The retention window passed without success - or the row was already past it when it was first read, and the handler was never called |
+
+`FAILED` is not final; `EXPIRED` is. Each try that ran adds one to `attempts`, success included;
+an expiry before any try does not.
+
+A handler that can never succeed - a transfer into a closed wallet, say - should **not** return
+an error. It should record a business outcome and return `Ok`; otherwise it is retried until the
+window closes. See [Sagas](/learn/sagas/).
+
+**Nothing deletes old rows.** `SUCCEEDED` and `EXPIRED` rows stay until you remove them.
+
+## Handler names are part of the schema
+
+`handler_name` stores the handler's `name()`, so queued rows carry the name the handler had when
+they were written. Rename a handler and every row queued under the old name finds no handler:
+each try fails with `No handler registered with name: <old name>`, until the rows expire.
+
+Keep the old name in `aliases()`:
+
+```rust
+impl EventHandler for WalletMoneyDepositedEventHandler {
+    type Event = WalletMoneyDepositedEvent;
+
+    fn name(&self) -> String {
+        "wallet-money-deposited-notification".to_owned()
+    }
+
+    fn aliases(&self) -> Vec<String> {
+        vec!["wallet-deposit-alert".to_owned()] // what it used to be called
+    }
+
+    fn handle(&self, envelope: EventEnvelope<WalletMoneyDepositedEvent>) -> Result<(), Error> {
+        // ...
+        Ok(())
+    }
+}
+```
+
+New rows are written with `name()`, and queued rows written under an alias still reach the
+handler. Drop the alias once no `PENDING` or `FAILED` row under the old name is left.
+
+## See also
+
+- [`events`](/reference/tables/events/) - the source rows
+- [Local event handler](/reference/events/local-event-handler/) - the two jobs
+- [Framework tables](/reference/tables/) - the map
+- [Sagas](/learn/sagas/) - why a final business failure is an event, not an error

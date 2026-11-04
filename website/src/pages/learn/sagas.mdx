@@ -1,0 +1,314 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Sagas
+activeSection: learn
+lead: Split a multi-step workflow into committed actions chained by events, with a compensation when a later step fails and nothing to roll back.
+---
+
+import LearnPager from "../../components/LearnPager.astro";
+import ModeTabs from "../../components/ModeTabs.astro";
+
+A **saga** is one business workflow written as a chain of smaller actions, each committed on
+its own. Use one when the workflow cannot honestly fit in one transaction: money moving between
+shards, work that spans services, or anything where a later step may have to make up for an
+earlier one that already committed.
+
+**ekbatan has no saga engine, and none is planned.** It gives you the two pieces a saga needs:
+every action commits its rows and its events together, and the
+[local event handler](/learn/consuming-events/) reliably turns a committed event into the next
+step.
+
+So a saga is **action → committed event → handler → next action**. Nothing sits in the middle
+deciding what runs next: each handler knows only its own next step. There is no coordinator to
+ask what state a transfer is in, because the state *is* the rows.
+
+## Why not one action across shards?
+
+Because there is no atomic commit across databases to have. An action whose changes land on two
+shards is refused. Allowing it with `allow_cross_shard(true)` does not buy atomicity: it opens
+**one transaction per shard**, each committing on its own. A failure rolls back only its own
+shard, and the ones that already committed stay committed.
+
+That is the [dual-write trap](/learn/the-dual-write-trap/) again, with two of your own
+databases in place of a database and a broker. A saga is the honest alternative: every step
+commits on its own, and a step that cannot go on starts a compensation instead of pretending
+the earlier ones did not happen.
+
+## The wallet transfer
+
+[`axum-wallet-saga-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-saga-pg)
+splits a transfer into three steps:
+
+| step | action | what commits | event |
+| --- | --- | --- | --- |
+| 1 | `InitiateTransferAction` | debit the source | `TransferInitiatedEvent` |
+| 2, it works | `CompleteTransferAction` | credit the destination | `TransferCompletedEvent` |
+| 2, it cannot | `CompleteTransferAction` | mark the transfer failed on the source | `TransferFailedEvent` |
+| 3, compensate | `RefundTransferAction` | credit the source back | `TransferRefundedEvent` |
+
+```
+POST /wallets/transfers
+  └─ Step 1: InitiateTransferAction            (one transaction, in the request)
+       debit the source, emit TransferInitiatedEvent
+         └─ TransferInitiatedEventHandler
+              └─ Step 2: CompleteTransferAction (one transaction)
+                   destination open, same currency?
+                     yes: credit it, emit TransferCompletedEvent   (done)
+                     no:  emit TransferFailedEvent on the *source*
+                            └─ TransferFailedEventHandler
+                                 └─ Step 3: RefundTransferAction (one transaction)
+                                      credit the source back, emit TransferRefundedEvent
+```
+
+Two commits when it works, three when it compensates. Each commit has its own events, so the
+event log shows what happened, step by step.
+
+Two details in that table are the whole design.
+
+**Step 2's failure is an event, not an error.** When the destination is missing, closed or in
+another currency, `CompleteTransferAction` does not return an `Err`. It commits a
+`TransferFailedEvent` on the *source* wallet. The compensation is then started by a business
+outcome that was committed like any other. An `Err` would be retried, and a closed wallet is
+still closed on the next attempt: the retries would run until the retention window ended, and
+the refund would never come.
+
+**Each step changes one wallet.** Step 1 debits the source, step 2 credits the destination,
+step 3 credits the source back. That is what lets each step be an ordinary single-shard action
+with an ordinary optimistic-lock check, even when the two wallets live on different databases.
+
+## What a saga costs the caller: 202, not 200
+
+```
+POST /wallets/transfers   ->  202 Accepted, with transferId and the debited source wallet
+```
+
+When that answer is written, **only step 1 has committed**: the money has left the source and
+has not arrived anywhere yet. A 200 would claim something that is still under way. 202 is the
+API telling the truth about what the database says right now, and it is how people avoid being
+surprised by a saga in production.
+
+The example has no endpoint that reports a transfer's state. The answer is in the rows: each
+step writes a marker row (`transfer_steps`, below), and every step's event is in
+`eventlog.events`. A status endpoint would read those. Since the markers *are* the state, adding
+a step needs no new table.
+
+## Compensation goes forward
+
+The refund is not a rollback. By the time it runs, the debit committed long ago. The
+compensation is a **new business fact**: the source was credited back because transfer X
+failed. The source wallet's history reads:
+
+```
+TransferInitiated → TransferFailed → TransferRefunded
+```
+
+You can explain the system's behaviour after the fact, because every step was kept.
+
+## Where the next step starts
+
+Do **not** run another action from inside `perform`. That would hide a second transaction inside
+the first action's logic, and the first one has not even committed yet.
+
+The safe place is **after the previous action has committed, when its event is consumed**. That
+consumer can be:
+
+- a [local event handler](/learn/consuming-events/) in your service (stored in the database,
+  safe across restarts, run on any instance);
+- a consumer in another service, fed by a reader of the event table or by a publishing handler;
+- a worker of your own that reads the event log.
+
+The example uses local event handlers, because every step lives in one service:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+use ekbatan::blocking::{ActionExecutor, EventHandler};
+use ekbatan::local_event_handler::EventEnvelope;
+
+pub struct TransferInitiatedEventHandler {
+    executor: Arc<ActionExecutor>,
+}
+
+impl EventHandler for TransferInitiatedEventHandler {
+    type Event = TransferInitiatedEvent;
+
+    fn name(&self) -> String {
+        "transfer-initiated-handler".to_owned()
+    }
+
+    fn handle(&self, envelope: EventEnvelope<TransferInitiatedEvent>) -> Result<(), Error> {
+        let e = envelope.event;
+        self.executor.execute::<CompleteTransferAction>(
+            Some(PRINCIPAL),
+            complete_transfer_action::Params {
+                transfer_id: e.transfer_id,
+                from_wallet_id: ShardedId::from_uuid(e.from_wallet_id),
+                to_wallet_id: ShardedId::from_uuid(e.to_wallet_id),
+                amount: e.amount,
+            },
+        )?;
+        Ok(())
+    }
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+use ekbatan::aio::{AsyncActionExecutor, AsyncEventHandler};
+use ekbatan::local_event_handler::EventEnvelope;
+
+pub struct TransferInitiatedEventHandler {
+    executor: Arc<AsyncActionExecutor>,
+}
+
+impl AsyncEventHandler for TransferInitiatedEventHandler {
+    type Event = TransferInitiatedEvent;
+
+    fn name(&self) -> String {
+        "transfer-initiated-handler".to_owned()
+    }
+
+    async fn handle(&self, envelope: EventEnvelope<TransferInitiatedEvent>) -> Result<(), Error> {
+        let e = envelope.event;
+        info!(
+            "Transfer {} initiated; invoking CompleteTransferAction",
+            e.transfer_id
+        );
+        self.executor
+            .execute::<CompleteTransferAction>(
+                Some(PRINCIPAL),
+                complete_transfer_action::Params {
+                    transfer_id: e.transfer_id,
+                    from_wallet_id: ShardedId::from_uuid(e.from_wallet_id),
+                    to_wallet_id: ShardedId::from_uuid(e.to_wallet_id),
+                    amount: e.amount,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+```
+
+</div>
+</ModeTabs>
+
+The example is async; the blocking version is the same handler with a plain `fn handle` and a
+blocking `ActionExecutor`.
+
+Notice what the handler takes: **the executor**, not a connection. It runs the next step as its
+own unit of work, with its own transaction and its own events. The transaction that produced
+`TransferInitiatedEvent` committed and ended before this handler ran, which is exactly what makes
+the chain safe to restart.
+
+Notice also what it reads: `envelope.event`, and nothing else. The event carries the whole
+transfer - its id, both wallets, the amount - so the handler needs no other row and no
+knowledge of where the other wallet lives.
+
+The second handler, `TransferFailedEventHandler`, has the same shape: given a
+`TransferFailedEvent`, run `RefundTransferAction`. Adding a step later means a new event and a
+new handler, and changes nothing that already works. The trade is that no single file shows
+the whole workflow; the event log does, after the fact.
+
+## Safe to run twice
+
+Delivery is at least once, so a step can run twice. Each step after the first writes a
+`TransferStep` marker beside its wallet change, and the table refuses a second marker for the
+same step of the same transfer:
+
+```sql
+CREATE TABLE transfer_steps (
+    id          UUID        PRIMARY KEY,
+    version     BIGINT      NOT NULL,
+    state       VARCHAR(24) NOT NULL,
+    transfer_id UUID        NOT NULL,
+    step        VARCHAR(64) NOT NULL,
+    UNIQUE (transfer_id, step)
+);
+```
+
+```rust
+async fn perform(
+    &self,
+    plan: &mut ActionPlan,
+    _principal: Option<&str>,
+    params: &Params,
+) -> Result<Wallet, Error> {
+    // A replay: this step already ran for this transfer.
+    if self
+        .transfer_step_repository
+        .exists_step(params.transfer_id, TransferStepName::CompleteTransfer)
+        .await?
+    {
+        return self
+            .wallet_repository
+            .get_by_id(&params.from_wallet_id)
+            .await;
+    }
+    plan.add(
+        TransferStep::create(params.transfer_id, TransferStepName::CompleteTransfer).build()?,
+    )?;
+    // ... then credit the destination, or mark the transfer failed on the source
+}
+```
+
+The check makes an ordinary replay cheap: the step sees its marker and does nothing. The
+constraint closes the gap a check alone leaves: if two deliveries race past the check, the
+second marker is refused, and the wallet change staged beside it rolls back with it. The money
+cannot arrive twice. The example's test replays steps 2 and 3 with the same transfer id and
+checks that no balance moves again.
+
+**On several shards, keep the marker with the wallet.** In the example everything is in one
+database, and `TransferStepRepository` does not shard, so its rows go to the default shard. If
+the wallets were spread over shards, a step that credits a wallet on another shard and writes
+its marker on the default one would be a cross-shard action, and refused. Put the marker on the
+same shard as the wallet the step changes.
+
+## Design rules
+
+**Put a correlation id in every saga event.** `InitiateTransferAction` makes a `transfer_id`
+and every event of the workflow carries it, so one transfer can be followed through the event
+log with a single `WHERE`.
+
+**Make events self-contained.** A handler should not have to read the producing action's
+parameters, or another row, to know what to do next. Put the next step's ids and the amount in
+the event itself.
+
+**Make each step safe to run twice**, with a unique constraint rather than a check alone, as
+above. Delivery is at least once everywhere, so it will happen.
+
+**Record final business failures as events, not errors.** A closed wallet is still closed on
+the next attempt, so retrying does not help. Commit a failure event, and let the compensation
+react to it like any other.
+
+**Keep compensation going forward.** Do not erase earlier facts. Add a new action and its event:
+the debit happened, and the refund is a second thing that also happened.
+
+**Choose local handlers or a broker by where the steps live.** The example uses local handlers
+because every step is in one service. If a later step belongs to another service, that service
+reads the event from the table instead. The saga's shape does not change.
+
+## What this gives you
+
+You do not get atomicity across the whole workflow. A caller may see the middle of it, and the
+202 is what makes that visible rather than surprising.
+
+What you get is a workflow that survives crashes and reaches its end: each step commits
+together with the event that announces it, the next step starts from a stored event, a failed
+business step is visible in the event log, and the compensation is explicit and can be audited.
+
+<LearnPager current="sagas" />
+
+## See also
+
+- [Consuming events](/learn/consuming-events/) - the handler pipeline a saga is built on
+- [Adding a shard](/learn/sharding/#cross-shard-actions-are-refused) - why a cross-shard
+  action is refused, and what allowing it costs
+- [The outbox](/learn/outbox/) - why every step gets a stored event
+- Reference: [Local event handler](/reference/events/local-event-handler/),
+  [Action executor](/reference/action-executor/)
+- [`axum-wallet-saga-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-saga-pg)
+  - the runnable transfer: the happy path, two compensations, and the replays

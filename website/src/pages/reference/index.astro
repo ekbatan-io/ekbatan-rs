@@ -1,0 +1,111 @@
+---
+// /reference/ - the API and convention reference. Dense, exhaustive, lookup-oriented.
+// Voice: assume the reader already knows what they want and wants the exact signature,
+// property or path.
+//
+// The groups[] registry below is the single source of truth for what is linked from here. Each
+// page has a twin in the repository's docs/reference/, written at the same time.
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import SectionCard from "../../components/SectionCard.astro";
+
+const linkTo = (p: string) => `${import.meta.env.BASE_URL}${p.replace(/^\//, "")}`;
+
+const groups = [
+    {
+        title: "Core",
+        entries: [
+            { href: "/reference/action/", title: "Action", blurb: "perform(), its plan, its params and result, blocking or async." },
+            { href: "/reference/action-plan/", title: "ActionPlan", blurb: "Where perform() stages its changes: add() and update()." },
+            { href: "/reference/action-executor/", title: "ActionExecutor", blurb: "Building one, what one transaction per shard means, retries, cross-shard." },
+            { href: "/reference/model/", title: "Model", blurb: "The immutable domain object that emits events: #[model], copy(), with_event()." },
+            { href: "/reference/entity/", title: "Entity", blurb: "Saved and versioned like a model, but emits no events: #[entity]." },
+            { href: "/reference/model-event/", title: "ModelEvent", blurb: "The event a model carries: #[model_event], and the row it becomes." },
+            { href: "/reference/testing/", title: "Testing", blurb: "ActionSpec and ActionAssert: run perform() with no database. VirtualClock." },
+        ],
+    },
+    {
+        title: "Database",
+        entries: [
+            { href: "/reference/repository/", title: "Repository", blurb: "AbstractRepository: the mapping you write; the reads and writes you get; picking a database." },
+            { href: "/reference/transaction-manager/", title: "TransactionManager", blurb: "Transactions outside an action: begin(), in_transaction()." },
+            { href: "/reference/sharding/", title: "Sharding", blurb: "ShardIdentifier, ShardedId, the strategies, and the unknown-shard policy." },
+            { href: "/reference/connecting/", title: "Connecting", blurb: "DataSourceConfig: URLs, logins, pools, driver settings, and TLS." },
+            { href: "/reference/config-files/", title: "Config files", blurb: "The ekbatan section: shards, pools, jobs and the event handler, from one JSON file." },
+            { href: "/reference/migrations/", title: "Migrations", blurb: "Plain SQL files with Flyway names, run by the app: per shard, and without a transaction when asked." },
+            { href: "/reference/schemagen/", title: "schemagen", blurb: "Table definitions generated in build.rs from a migrated throwaway database." },
+            { href: "/reference/keyed-locks/", title: "Keyed locks", blurb: "A lock named by a string, in-process or on the database, and how a lease behaves." },
+            { href: "/reference/multi-database/", title: "Multi-database", blurb: "The three databases, the column-type cheatsheet, and the UTC rule." },
+        ],
+    },
+    {
+        title: "Framework tables",
+        entries: [
+            { href: "/reference/tables/", title: "Framework tables", blurb: "Which framework tables you need, where they live, and how they get into your database." },
+            { href: "/reference/tables/events/", title: "events", blurb: "The outbox: event rows written in the same transaction as each action." },
+            { href: "/reference/tables/event-notifications/", title: "event_notifications", blurb: "Optional. One delivery row per event and handler: states, retries, handler names." },
+            { href: "/reference/tables/scheduled-tasks/", title: "scheduled_tasks", blurb: "Optional. One row per distributed job: the slot, the claim, the heartbeat." },
+        ],
+    },
+    {
+        title: "Runtime",
+        entries: [
+            { href: "/reference/runtime/blocking-and-async/", title: "Blocking and async", blurb: "ekbatan::blocking and ekbatan::aio: the twins, the runtime under the blocking API, block_on." },
+            { href: "/reference/runtime/observability/", title: "Observability", blurb: "OpenTelemetry spans and metrics, and the log targets." },
+            { href: "/reference/jobs/distributed-jobs/", title: "Distributed jobs", blurb: "DistributedJob and JobRegistry: background work that runs once per slot across a cluster." },
+            { href: "/reference/events/local-event-handler/", title: "Local event handler", blurb: "Handling your own events in your own service: the fan-out and handling jobs." },
+        ],
+    },
+    {
+        title: "Databases",
+        entries: [
+            { href: "/reference/dialects/postgresql/", title: "PostgreSQL", blurb: "Native UUID, JSONB, RETURNING, advisory locks, and TLS when the server offers it." },
+            { href: "/reference/dialects/mysql/", title: "MySQL", blurb: "CHAR(36) ids, no RETURNING, GET_LOCK, and why a password login needs TLS." },
+            { href: "/reference/dialects/mariadb/", title: "MariaDB", blurb: "Close enough to MySQL to share a driver, and where it is not." },
+        ],
+    },
+] as const;
+---
+
+<BaseLayout
+    title="Reference"
+    description="API and conventions reference. Class signatures, method semantics, dialect specifics, configuration keys."
+    activeSection="reference"
+>
+    <section class="border-b-2 border-ink">
+        <div class="container-px max-w-7xl mx-auto py-20 md:py-28">
+            <div class="inline-flex items-center gap-3 brutalist-border bg-ink text-paper font-mono text-[11px] uppercase tracking-widest px-3 py-1.5">
+                <span class="text-yellow">&#167;</span><span>Reference</span>
+            </div>
+            <h1 class="font-display font-bold text-4xl md:text-6xl tracking-tight max-w-4xl text-balance mt-6 leading-[0.95]">
+                Every class.{' '}
+                <span class="bg-yellow px-2">Every config.</span>
+            </h1>
+            <p class="mt-6 max-w-2xl text-lg leading-relaxed">
+                For looking things up. Each page covers one class or one part of the framework:
+                what it does, its methods and settings, and what differs between databases. If
+                you already know what you are looking for, start here.
+            </p>
+
+            {
+                groups.map((group) => (
+                    <div class="mt-14">
+                        <h2 class="font-display text-3xl font-bold tracking-tight border-b-2 border-ink pb-2">
+                            {group.title}
+                        </h2>
+                        <div class="mt-6 grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+                            {group.entries.map((entry) => (
+                                <SectionCard
+                                    href={linkTo(entry.href)}
+                                    title={entry.title}
+                                    blurb={entry.blurb}
+                                    status="ready"
+                                    size="compact"
+                                />
+                            ))}
+                        </div>
+                    </div>
+                ))
+            }
+        </div>
+    </section>
+</BaseLayout>

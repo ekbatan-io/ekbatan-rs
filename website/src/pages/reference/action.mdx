@@ -1,0 +1,357 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Action
+activeSection: reference
+lead: "An action is one unit of business work. Its perform() reads what it needs and stages new and changed models on an ActionPlan. The executor then writes them, with their events, in one transaction."
+---
+
+import ModeTabs from "../../components/ModeTabs.astro";
+
+## The trait
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+// ekbatan::blocking::Action
+pub trait Action: Send + Sync + 'static {
+    type Params: Serialize + Send + Sync;
+    type Result: Send;
+
+    fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        principal: Option<&str>,
+        params: &Self::Params,
+    ) -> Result<Self::Result, Error>;
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+// ekbatan::aio::AsyncAction
+pub trait AsyncAction: Send + Sync + 'static {
+    type Params: Serialize + Send + Sync;
+    type Result: Send;
+
+    fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        principal: Option<&str>,
+        params: &Self::Params,
+    ) -> impl Future<Output = Result<Self::Result, Error>> + Send;
+}
+```
+
+</div>
+</ModeTabs>
+
+`Params` is the input and `Result` is what the action returns. Both are types on the action, so
+`executor.execute::<WalletDepositMoneyAction>(None, params)` takes that action's `Params` and
+returns its `Result`. Passing the wrong params is a compile error.
+
+The two traits differ only in `perform`: a plain `fn` in `Action`, an `async fn` in
+`AsyncAction`. **Every `Action` is also an `AsyncAction`**: the crate implements one for the
+other. So both kinds go in the same `ActionRegistry`, and both executors run both kinds. See
+[Blocking and async](/reference/runtime/blocking-and-async/).
+
+`Error` is `ekbatan::Error`. `ActionPlan` is `ekbatan::action::ActionPlan`.
+
+## Declaring an action
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+use ekbatan::action::ActionPlan;
+use ekbatan::blocking::{Action, Repository};
+use ekbatan::{Error, ShardedId};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Params {
+    pub wallet_id: ShardedId<Wallet>,
+    pub amount: Decimal,
+}
+
+pub struct WalletDepositMoneyAction {
+    wallet_repository: Arc<WalletRepository>,
+}
+
+impl Action for WalletDepositMoneyAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = self.wallet_repository.get_by_id(&params.wallet_id)?;
+        let updated = wallet.deposit(params.amount)?;
+        plan.update(updated)
+    }
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::{AsyncAction, AsyncRepository};
+use ekbatan::{Error, ShardedId};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Params {
+    pub wallet_id: ShardedId<Wallet>,
+    pub amount: Decimal,
+}
+
+pub struct WalletDepositMoneyAction {
+    wallet_repository: Arc<WalletRepository>,
+}
+
+impl AsyncAction for WalletDepositMoneyAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    async fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = self.wallet_repository.get_by_id(&params.wallet_id).await?;
+        let updated = wallet.deposit(params.amount)?;
+        plan.update(updated)
+    }
+}
+```
+
+</div>
+</ModeTabs>
+
+What the action needs - repositories, a clock - comes through its constructor, once, when the
+service starts. What one call needs comes through `params`.
+
+## Params
+
+`Params` is saved in full, as JSON, in the `action_params` column of every
+[event row](/reference/tables/events/) the call writes. So it must serialize to a **JSON
+object**: a struct with named fields. Anything else - `null`, a number, a list - is refused with
+`Error::Invalid`. The check runs after `perform()` and before anything is written.
+
+An action with no input still needs an object. Use an empty struct **with braces**:
+
+```rust
+#[derive(Serialize)]
+struct NoParams {}
+```
+
+A unit struct (`struct NoParams;`) is written as `null`, and is refused.
+
+The examples put `#[serde(rename_all = "camelCase")]` on params, so their keys look like the keys
+of the event payloads, which are always camelCase.
+
+## Registering an action
+
+Nothing finds an action on its own. You build each one and put it in an `ActionRegistry`:
+
+```rust
+let actions = ActionRegistry::builder()
+    .with_action(WalletCreateAction::new(clock.clone()))
+    .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+    .with_action(WalletCloseAction::new(wallets.clone()))
+    .build();
+```
+
+The registry maps each action **type** to its one instance. That is why `execute` takes the type
+as a parameter (`execute::<WalletDepositMoneyAction>`) and not an instance. Registering the same
+type twice keeps the last one.
+
+An action that was never registered is refused with `Error::Invalid` ("No action registered for
+class ..."), before `perform()` runs. To run an action you just built, in a test, use
+[`ActionSpec`](/reference/testing/).
+
+How an action runs - retries, whether it may touch two shards - is set by an
+[`ExecutionConfiguration`](/reference/action-executor/#retries), on the executor or on one call.
+Never on the action itself.
+
+## The two phases
+
+```
+executor.execute::<WalletDepositMoneyAction>(principal, params)
+         |
+         v
++- Phase 1: perform(), no transaction ----------------------+
+|  read, build new values, attach events, plan.add/update   |
++-----------------------------------------------------------+
+         |
+         v
++- Phase 2: the executor, one transaction per shard --------+
+|  1. group the staged changes by shard                     |
+|  2. on each shard: BEGIN                                  |
+|       the staged rows      -> your tables                 |
+|       one row per event    -> eventlog.events             |
+|     COMMIT                                                |
++-----------------------------------------------------------+
+```
+
+Phase one opens no transaction. Phase two is the only place one is opened, and it always writes
+the staged rows and their event rows together. A row can't be written without its event row,
+because both go in the same transaction.
+
+The grouping in phase two is why `perform()` does not care about shards. It stages values; the
+executor then works out which database each one belongs to.
+
+Each attempt gets a **fresh plan**. A retry runs phase one again from the start.
+
+## perform()
+
+`perform(&self, plan, principal, params)` is your logic: read what you need, build the new
+values, stage them, return the result.
+
+- **`plan`** is where you stage changes. It is new for each call and each retry. See
+  [ActionPlan](/reference/action-plan/).
+- **`principal`** is whoever the caller named: the first argument of `execute`, or `None`. It
+  is **not saved** in any column. It goes into the log line and the `ekbatan.action.principal`
+  span attribute. If "who did this" must be kept, put it in `params`.
+- **`params`** is the call's input, by reference.
+
+### Returning an error
+
+Return `Err` to stop. Nothing the call staged is written. Errors are `ekbatan::Error`, so `?`
+works on the framework's own calls and on your model methods that return `Result<_, Error>`.
+
+For an error of your own, wrap it with `Error::action(...)`. It must implement
+`std::error::Error + Send + Sync + 'static`:
+
+```rust
+if params.initial_balance.is_sign_negative() {
+    return Err(Error::action(NoNegativeBalance));
+}
+```
+
+The caller gets it back with `error.action_error::<NoNegativeBalance>()`, which is `Some` when
+the error is `Error::Action` holding that type. A retry policy can match it by type too:
+`RetryOn::error::<NoNegativeBalance>()`.
+
+### Time
+
+Read time from a `Clock` the action was given, never from `chrono::Utc::now()`:
+
+```rust
+pub struct WalletCreateAction {
+    clock: Arc<dyn Clock>,
+}
+
+// in perform():
+Wallet::create_wallet(shard, params.owner_id, &params.currency,
+    params.initial_balance, self.clock.instant())
+```
+
+A test can then freeze the clock with [`VirtualClock`](/reference/testing/#virtualclock).
+
+The executor has a clock of its own, which stamps the event rows' dates. Give the action and the
+executor **the same clock**. Nothing checks this: with two clocks, a test that freezes one sees
+the other still moving.
+
+### perform() is not in a transaction
+
+The transaction opens after `perform()` returns. A repository write called inside `perform()`
+with no transaction (`wallets.add(None, &wallet)`) is written straight away, on its own. It is
+not part of the action's commit, and it gets no event row. That is the
+[dual write](/learn/the-dual-write-trap/) the framework exists to prevent.
+
+Inside `perform()`, **stage** changes with `plan.add(...)` and `plan.update(...)`. Read with the
+repository as much as you like.
+
+### Safe to repeat
+
+A retry runs `perform()` again from the start. Anything it does besides reading and staging -
+an HTTP call, a message sent - happens once per attempt. Keep `perform()` to reads and staging,
+or turn retries off for that call with `ExecutionConfiguration::builder().no_retry()`.
+
+## One instance serves every call
+
+The registry holds one instance per action type, shared by every call at the same time. That is
+why the trait asks for `Send + Sync + 'static`. Keep in it only what the constructor set - the
+repositories, the clock - and keep anything per call in `perform()`'s own variables or on the
+plan.
+
+## Retries
+
+The default retries a stale record once, after 100 ms: `Error::StaleRecord` or
+`Error::StaleRecords`, which mean someone else saved a newer version first.
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let config = ExecutionConfiguration::builder().with_retry(
+    RetryOn::stale_record(),
+    RetryConfig::new(3, Duration::from_millis(50)),
+);
+executor.execute_with::<WalletDepositMoneyAction>(None, params, &config)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let config = ExecutionConfiguration::builder().with_retry(
+    RetryOn::stale_record(),
+    RetryConfig::new(3, Duration::from_millis(50)),
+);
+executor.execute_with::<WalletDepositMoneyAction>(None, params, &config).await?;
+```
+
+</div>
+</ModeTabs>
+
+- **`max_retries` counts retries, not attempts.** `RetryConfig::new(1, ...)` runs the action up
+  to twice.
+- **Each retry starts from phase one**, with a fresh plan.
+- The full rules are on [ActionExecutor](/reference/action-executor/#retries).
+
+## Cross-shard
+
+By default, an action whose staged changes land on two shards is refused with
+`Error::CrossShard`, and nothing is written. To allow it for one call:
+
+```rust
+let allow = ExecutionConfiguration::builder().allow_cross_shard(true);
+executor.execute_with::<OpenOnBothShards>(None, params, &allow)
+```
+
+Each shard then commits on its own. There is no two-phase commit: if a later shard fails, the
+earlier ones stay committed. See
+[ActionExecutor](/reference/action-executor/#cross-shard). If a partial commit would need undoing,
+write a [saga](/learn/sagas/) instead.
+
+## No nesting
+
+Don't run another action from inside `perform()`. Nothing stops you, but the inner action
+commits in its own transaction, at once, and stays committed if the outer one then fails. If two
+changes must happen together, they are one action. If one must follow the other, run the second
+after the first has committed - which is what a [saga](/learn/sagas/) does.
+
+## A blocking action under an async runtime
+
+When a blocking `Action` runs inside the async executor, its `perform()` runs through tokio's
+`block_in_place`. That needs tokio's **multi-thread** runtime. On a current-thread runtime it
+panics. Plain `#[tokio::test]` is current-thread, so a test that runs a blocking action in the
+async executor needs `#[tokio::test(flavor = "multi_thread")]`.
+
+## See also
+
+- [ActionPlan](/reference/action-plan/) - where `perform()` stages
+- [ActionExecutor](/reference/action-executor/) - what runs an action
+- [Testing](/reference/testing/) - `perform()` with no executor
+- [Model](/reference/model/) · [Entity](/reference/entity/) - what an action stages
+- [Learn: Actions](/learn/actions/)

@@ -1,0 +1,241 @@
+# Config files
+
+The ekbatan section: shards, pools, jobs and the event handler, from one JSON file. You get the same objects you would build in code, with environment variables filled in, and no error ever shows a value.
+
+`EkbatanConfig::load_json(path)` reads the `ekbatan` section of a JSON file and returns an
+`EkbatanConfig`:
+
+```rust
+use ekbatan::{DatabaseRegistry, EkbatanConfig, Error};
+
+let path = std::env::var("EKBATAN_CONFIG").unwrap_or_else(|_| "ekbatan.json".to_owned());
+let config = EkbatanConfig::load_json(&path)?;
+let sharding = config
+    .sharding
+    .as_ref()
+    .ok_or_else(|| Error::Config("ekbatan.sharding is required".to_owned()))?;
+let registry = DatabaseRegistry::from_sharding_config(sharding)?;
+```
+
+Every example in `ekbatan-rs-examples` starts this way, from an `ekbatan.json` beside its
+`Cargo.toml`.
+
+**JSON is the only file format read.** There is no YAML, TOML or INI reader in the framework. For
+another format, parse the file yourself into a `serde_json::Value` and hand the tree to
+`EkbatanConfig::from_tree(&tree)`: everything below applies to it the same way.
+
+The section's layout and key names are Ekbatan for Java's `ekbatan:` section, so a Java
+service's settings can be copied over as they are, converted to JSON. Anything outside `ekbatan`
+is left alone, so the file can hold your own settings too.
+
+A file gets the same checks as code. A URL with a login in it, a blank username, or a driver
+setting named `password` is refused exactly as it is when you build the config in code.
+
+## The whole section
+
+```json
+{
+  "ekbatan": {
+    "namespace": "example.wallet",
+    "sharding": {
+      "defaultShard": { "group": 0, "member": 0 },
+      "unknownShardPolicy": "FAIL",
+      "groups": [
+        {
+          "group": 0,
+          "name": "global",
+          "members": [
+            {
+              "member": 0,
+              "name": "global",
+              "configs": {
+                "primaryConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD}",
+                  "dataSourceProperties": { "application_name": "wallet-service" },
+                  "maximumPoolSize": 20
+                },
+                "jobsConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD}",
+                  "maximumPoolSize": 5
+                },
+                "lockConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD}",
+                  "maximumPoolSize": 30
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "jobs": { "pollingInterval": "PT1S" },
+    "local-event-handler": { "handling": { "enabled": true } }
+  }
+}
+```
+
+| key | becomes | when the file has none |
+| --- | --- | --- |
+| `namespace` | `config.namespace: Option<String>` | `None`. The action executor needs one, so in practice it is required |
+| `sharding` | `config.sharding: Option<ShardingConfig>` | `None`: the app decides, as the examples do by refusing to start |
+| `jobs` | `config.jobs: Option<serde_json::Value>`, read with `JobsConfig::from_value` | `None`: the job registry's defaults |
+| `local-event-handler` | `config.local_event_handler: Option<serde_json::Value>`, read with `LocalEventHandlerConfig::from_value` | `None`: the jobs' defaults, and handling off |
+
+`jobs` and `local-event-handler` are kept as they were read. The app turns them into settings
+when it builds the jobs:
+
+```rust
+let jobs_config = match &config.jobs {
+    Some(section) => JobsConfig::from_value(section)?,
+    None => JobsConfig::default(),
+};
+let handler_config = match &config.local_event_handler {
+    Some(section) => LocalEventHandlerConfig::from_value(section)?,
+    None => LocalEventHandlerConfig::default(),
+};
+```
+
+So a mistake inside those two sections is caught when the app reads them, not when the file is
+loaded. Environment variables are not filled in inside them either: write their values out.
+
+## Key spellings
+
+Every key may be camelCase, kebab-case or snake_case: `defaultShard`, `default-shard` and
+`default_shard` are one key, as are `primaryConfig`, `primary-config` and `primary_config`. The
+names you give your own configs are turned into camelCase too, so `lock-config` is read back with
+`member.config_for("lockConfig")`.
+
+The one exception is inside `dataSourceProperties`. Those names are the driver's own and are kept
+exactly as written.
+
+**A key that means nothing is refused**, with its path and the keys that do mean something:
+
+```
+invalid configuration: ekbatan.shardng means nothing here; known keys: namespace, sharding, jobs, localEventHandler
+```
+
+So a misspelt key fails at startup instead of being silently ignored.
+
+## `sharding`
+
+| key | required | |
+| --- | --- | --- |
+| `defaultShard` | yes | `{ "group": 0, "member": 0 }` |
+| `unknownShardPolicy` | no | `USE_DEFAULT_SHARD` (the default) or `FAIL`. Case, `_` and `-` do not matter; blank is the default. See [Sharding](/reference/sharding/#shards-this-deployment-does-not-have) |
+| `groups` | yes | a list. At least one |
+| `groups[].group` | no | 0 to 255; 0 when left out |
+| `groups[].name` | yes | |
+| `groups[].members` | yes | a list. At least one |
+| `members[].member` | no | 0 to 63; 0 when left out |
+| `members[].name` | no | names the member in migration logs |
+| `members[].configs` | yes | a map of name to datasource. `primaryConfig` is required |
+
+The checks of [Sharding](/reference/sharding/#the-layout) apply: no group twice, no member twice
+in a group, and the default shard must be one of the configured ones.
+
+## A datasource
+
+Each entry of `configs` is one `DataSourceConfig` (see [Connecting](/reference/connecting/)),
+under Ekbatan for Java's key names:
+
+| key | required | becomes |
+| --- | --- | --- |
+| `jdbcUrl` | yes | the dialect and the URL, read by `DataSourceConfig::from_jdbc_url`: `jdbc:postgresql://`, `jdbc:mysql://`, `jdbc:mariadb://`, or sqlx's own `postgres://` and `mysql://`. Its query parameters become `dataSourceProperties`. No login in it |
+| `username` | no | `username` |
+| `password` | no | `password` |
+| `maximumPoolSize` | no | `maximum_pool_size`; **10** when left out |
+| `minimumIdle` | no | `minimum_idle` |
+| `idleTimeout` | no | `idle_timeout`, **in milliseconds** |
+| `connectionTimeout` | no | `connection_timeout`, **in milliseconds** |
+| `dataSourceProperties` | no | `data_source_properties`: a map of single values. Numbers and `true`/`false` are turned into text |
+| `leakDetectionThreshold` | no | milliseconds: 0 or at least 2000. Checked and kept; it does nothing |
+| `driverClassName` | no | accepted and ignored: sqlx picks its driver from the URL |
+
+The last two are there so a Java service's file loads unchanged.
+
+A number may be written as a number or as text: `"maximumPoolSize": 20` and
+`"maximumPoolSize": "${POOL:20}"` both work. A map or a list inside `dataSourceProperties` is
+refused, since no driver setting holds one.
+
+## `jobs`
+
+Read by `JobsConfig::from_value`, applied with `JobRegistry::builder().jobs_config(&jobs_config)`.
+
+| key | default | |
+| --- | --- | --- |
+| `pollingInterval` | `PT10S` | how often each instance asks for due jobs. Not zero |
+| `heartbeatInterval` | `PT10S` | how often a running job stamps its heartbeat. Not zero |
+| `shutdownMaxWait` | `PT30M` | how long `stop()` waits for running jobs |
+
+See [Distributed jobs](/reference/jobs/distributed-jobs/).
+
+## `local-event-handler`
+
+Read by `LocalEventHandlerConfig::from_value`.
+
+| key | default | |
+| --- | --- | --- |
+| `fanoutPollDelay` | `PT1S` | the fan-out job's wait when there was nothing to do |
+| `fanoutBatchSize` | 200 | events read per shard per round |
+| `handlingPollDelay` | `PT1S` | the handling job's wait when there was nothing to do |
+| `handlingBatchSize` | 100 | notifications read per shard per round |
+| `handlingMaxBackoffCap` | `PT5M` | the longest wait between two tries |
+| `handlingRetentionWindow` | `P7D` | how long after its event a notification is still tried |
+| `handling.enabled` | `false` | your wiring's switch: the examples register the two jobs only when it is `true` |
+
+Durations must be positive; batch sizes are whole numbers above 0. See
+[Local event handler](/reference/events/local-event-handler/#configuration).
+
+### Durations
+
+In `jobs` and `local-event-handler`, durations are **ISO-8601 text**: `PT10S` (10 seconds),
+`PT0.5S`, `PT1M30S`, `P1DT2H` (1 day and 2 hours). A bare number is refused - is it seconds or
+milliseconds? - and so is a short form such as `10s`.
+
+The datasource keys `idleTimeout`, `connectionTimeout` and `leakDetectionThreshold` are the
+exception: whole **milliseconds**, as in Ekbatan for Java.
+
+## Environment variables
+
+Inside `namespace` and `sharding`, any text value may name environment variables, in the same
+form as Ekbatan for Java's files:
+
+| written | becomes |
+| --- | --- |
+| `${DB_PASSWORD}` | the variable's value. If it is not set, the load stops, naming the variable |
+| `${DB_PORT:5432}` | the variable's value, or `5432` when it is not set |
+| `${DB_PASSWORD:}` | the variable's value, or the empty string |
+| `$${` | a literal `${` |
+
+- **A variable that is set but empty is used as it is.** Only an unset one falls back to the
+  default.
+- **A filled-in value is used as it is** and never read again, so a password holding `$` or `{`
+  works.
+- **Several in one value** work: `jdbc:postgresql://${HOST}:${PORT:5432}/wallet`.
+- **Only values.** A key cannot come from a variable.
+- To fill variables from somewhere other than the process environment - a test, a secrets
+  store - use `EkbatanConfig::from_tree_with_env(&tree, &|name| lookup(name))`.
+
+## Errors
+
+Every error names the key's path, or the variable's name, and never a value:
+
+```
+invalid configuration: ekbatan.sharding.groups[1].members[0].configs.primaryConfig: maximumPoolSize must be at least 1
+invalid configuration: ekbatan.sharding.groups[1].members[0].configs.primaryConfig.jdbcUrl uses ${HOST}, which is not set and has no default
+```
+
+A file that is not valid JSON is reported by its line and column only, never the text there,
+since that line may hold a secret.
+
+## See also
+
+- [Connecting](/reference/connecting/) - what each datasource setting does
+- [Sharding](/reference/sharding/) - the layout, and what is checked
+- [Distributed jobs](/reference/jobs/distributed-jobs/) · [Local event handler](/reference/events/local-event-handler/)

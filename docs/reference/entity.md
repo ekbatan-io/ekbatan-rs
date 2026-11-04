@@ -1,0 +1,141 @@
+# Entity
+
+An entity is saved and versioned like a model, but emits no events and has no dates. Use one for rows whose changes nobody outside this service needs to hear about: lookup tables, idempotency markers, notifications already described by the event that caused them. #[entity] turns a plain struct into one.
+
+## Declaring an entity
+
+```rust
+use ekbatan::{Error, Id, entity};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationState {
+    Pending,
+    Sent,
+    Failed,
+    Deleted,
+}
+
+#[entity(id = Id<Notification>, state = NotificationState, validate = Notification::validate)]
+pub struct Notification {
+    pub wallet_id: Uuid,
+    pub kind: String,
+    pub recipient: String,
+    pub message: String,
+}
+
+impl Notification {
+    fn validate(&self) -> Result<(), Error> {
+        if self.recipient.trim().is_empty() {
+            return Err(Error::Invalid("recipient cannot be blank".to_owned()));
+        }
+        if self.message.trim().is_empty() {
+            return Err(Error::Invalid("message cannot be blank".to_owned()));
+        }
+        Ok(())
+    }
+}
+```
+
+`#[entity(...)]` takes the same arguments as [`#[model]`](/reference/model/#declaring-a-model):
+`id = ...` and `state = ...`, both required, and `validate = path`, optional. The same rules
+apply to the struct: named fields, no generic parameters, no field called `base`.
+
+When an entity needs no lifecycle of its own, `ekbatan::GenericState` has the two states most
+need, `Active` and `Deleted`, written as `ACTIVE` and `DELETED` (`as_str()` and `parse()`):
+
+```rust
+#[entity(id = Id<Currency>, state = GenericState)]
+pub struct Currency {
+    pub code: String,
+    pub display_name: String,
+}
+```
+
+## What `#[entity]` writes
+
+The same as `#[model]`, minus events and dates:
+
+- a private `base` field holding id, state and version;
+- your fields made private, each with a getter returning a reference;
+- `#[derive(Clone, Debug, PartialEq)]`;
+- a builder, `NotificationBuilder`;
+- `impl Persistable` and `impl Entity`.
+
+```rust
+// ekbatan::Entity
+fn copy(&self) -> Self::Builder;
+fn state(&self) -> Self::State;
+```
+
+`Persistable` gives `id()`, `version()`, `next_version()`, `model_name()`, and `is_model()`,
+which is `false`.
+
+The trait methods need their trait in scope: `use ekbatan::{Entity, Persistable};`. Without the
+import, name the trait in the call: `ekbatan::Entity::state(&notification)`.
+
+## Differences from Model
+
+| | model | entity |
+| --- | --- | --- |
+| emits events | yes | **no** |
+| `created_date` / `updated_date` | yes | **no** |
+| `version`, optimistic locking | yes | yes |
+| `state`, soft deletion (`DELETED`) | yes | yes |
+| staged on the plan | yes | yes |
+| in the event log | one row per event | only the action's own row, with no event |
+
+**No events.** The builder has no `with_event`, so there is no way to attach one. Writing an
+entity emits nothing. The action that wrote it is still recorded: if it emitted no events at all,
+it writes its one row with the event columns empty. The log is of units of work, not only of
+events.
+
+**No dates.** An entity is current state, not history. If it needs to know when it last changed,
+that change is probably worth telling others about, which makes it a model.
+
+## Changing an entity
+
+The same as a model: `copy()`, set what changed, `build()`. With no event to attach, a change
+simply returns the new value:
+
+```rust
+impl Notification {
+    pub fn mark_sent(&self) -> Result<Notification, Error> {
+        self.copy().state(NotificationState::Sent).build()
+    }
+}
+```
+
+`build()` checks that every field is set and the version is at least 1, then runs `validate`.
+
+A new one, with a random id:
+
+```rust
+NotificationBuilder::new()
+    .id(Id::random())
+    .state(NotificationState::Pending)
+    .wallet_id(wallet_id)
+    .kind(kind.to_owned())
+    .recipient(recipient.to_owned())
+    .message(message.to_owned())
+    .with_initial_version()
+    .build()?
+```
+
+`Id::random()` is a random (version 4) UUID; `Id::of(uuid)` wraps one you have. An entity can
+use `ShardedId` too, when it lives on several shards.
+
+## Equality
+
+The derived `PartialEq` compares the base - id, state and version - and every field of yours.
+
+## Builder API
+
+`new()`, `id(...)`, `state(...)`, `version(...)`, `with_initial_version()`,
+`increase_version()`, `copy_base(&other)`, one setter per field, and `build()`. The date and
+event setters of a [model's builder](/reference/model/#builder-api) are not on it.
+
+## See also
+
+- [Model](/reference/model/) - the same, with events and dates
+- [Repository](/reference/repository/) - one repository per entity type, like a model
+- [Learn: Models and entities](/learn/models-and-entities/)

@@ -1,0 +1,71 @@
+---
+// The single layout every page uses.
+//
+// Owns the <html>/<head>, the outer wrapper, and the global Nav and Footer. The page's
+// own content goes in the <slot />.
+//
+// Style order matters: fonts, then the frozen Java bundle, then palette.css last so its
+// custom properties win. See src/styles/palette.css.
+import "../styles/fonts.css";
+import "../styles/styles.css";
+import "../styles/palette.css";
+import Nav from "../components/Nav.astro";
+import Footer from "../components/Footer.astro";
+import OverlayScrollbar from "../components/OverlayScrollbar.astro";
+
+interface Props {
+    title: string;
+    description?: string;
+    activeSection?: "learn" | "reference";
+}
+
+const {
+    title,
+    description = "A Rust persistence framework with the transactional outbox built in. State and events committed in one transaction. sqlx and sea-query, PostgreSQL, MySQL, MariaDB.",
+    activeSection,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{title} — ekbatan-rs</title>
+        <meta name="description" content={description} />
+        <meta property="og:title" content={title} />
+        <meta property="og:description" content={description} />
+        <meta property="og:type" content="website" />
+        <meta name="twitter:card" content="summary" />
+        <meta name="twitter:title" content={title} />
+        <meta name="twitter:description" content={description} />
+        <link rel="icon" href="data:," />
+        <OverlayScrollbar />
+    </head>
+    <body>
+        <div class="min-h-screen text-ink bg-paper">
+            <Nav activeSection={activeSection} />
+            <slot />
+            <Footer />
+        </div>
+        <script is:inline>
+            // The canvas is one colour shared by both overscroll ends, and only a solid colour
+            // fills the rubber band - so bone above the header and charcoal below the footer
+            // is only possible by changing it with the scroll position. See palette.css for
+            // the three CSS approaches that cannot do this.
+            (() => {
+                const de = document.documentElement;
+                const paint = () => {
+                    const atEnd =
+                        window.scrollY + window.innerHeight >= de.scrollHeight - 4;
+                    de.style.backgroundColor = atEnd
+                        ? "var(--ink)"
+                        : "var(--paper)";
+                };
+                addEventListener("scroll", paint, { passive: true });
+                addEventListener("resize", paint);
+                paint();
+            })();
+        </script>
+    </body>
+</html>

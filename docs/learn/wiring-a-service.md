@@ -1,0 +1,505 @@
+# Wiring a service
+
+Every object a service needs, built from one config file and closed in the right order, with a separate connection pool for each kind of work.
+
+A service is wired by hand, in one function. There is no container, no scanning and no
+attribute to register things with. You list the parts, in the order they are needed, and you
+can read that list to know what the program contains.
+
+Every snippet on this page comes from an example that passes its own tests:
+[`axum-wallet-rest-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-pg)
+(async, `src/app.rs`) and
+[`job-worker-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/job-worker-pg)
+(blocking, `src/app.rs`).
+
+## The shape
+
+One function that builds everything and returns one value, and one function that stops it.
+`App` and `Worker` are the examples' own types, not ekbatan's: you write yours to hold what your
+service needs.
+
+**Blocking**
+
+```rust
+/// The running worker.
+pub struct Worker {
+    pub registry: Arc<DatabaseRegistry>,
+    pub executor: Arc<ActionExecutor>,
+    pub wallets: Arc<WalletRepository>,
+    pub notifications: Arc<NotificationRepository>,
+    pub jobs: JobRegistry,
+}
+
+impl Worker {
+    pub fn start(config: &EkbatanConfig) -> Result<Worker, Error> { /* ... */ }
+
+    /// Stops taking new slots, lets running jobs finish, then closes every pool.
+    pub fn stop(&self) {
+        block_on(self.jobs.stop());
+        self.registry.close();
+    }
+}
+```
+
+**Async**
+
+```rust
+/// The running service: its routes, and what must be stopped when it ends.
+pub struct App {
+    pub router: Router,
+    pub registry: Arc<DatabaseRegistry>,
+    pub wallets: Arc<WalletRepository>,
+    pub notifications: Arc<NotificationRepository>,
+    pub jobs: JobRegistry,
+}
+
+impl App {
+    pub async fn start(config: &EkbatanConfig) -> Result<App, Error> { /* ... */ }
+
+    /// Stops the jobs (letting running ones finish), then closes every pool.
+    pub async fn stop(&self) {
+        self.jobs.stop().await;
+        self.registry.as_async().close().await;
+    }
+}
+```
+
+`start` does five things, in this order:
+
+1. run the migrations, on every shard's database;
+2. build a `DatabaseRegistry`, with one pool per shard;
+3. build the repositories and the executor, with the actions;
+4. build a keyed lock provider and a job registry, each on a pool of its own;
+5. add the local event handler's jobs, when the config turns them on, and start the jobs.
+
+## One config file
+
+Everything starts from `ekbatan.json`. It holds an `ekbatan` section, with the same keys as
+the `ekbatan:` section of a Java service's `application.yml`:
+
+```json
+{
+  "ekbatan": {
+    "namespace": "example.wallet",
+    "sharding": {
+      "defaultShard": { "group": 0, "member": 0 },
+      "groups": [
+        {
+          "group": 0,
+          "name": "global",
+          "members": [
+            {
+              "member": 0,
+              "name": "global",
+              "configs": {
+                "primaryConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "dataSourceProperties": { "application_name": "wallet-service" },
+                  "maximumPoolSize": 20
+                },
+                "jobsConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 5
+                },
+                "lockConfig": {
+                  "jdbcUrl": "${DATABASE_URL:jdbc:postgresql://localhost:5432/wallet}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 30
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "local-event-handler": {
+      "handling": { "enabled": true }
+    }
+  }
+}
+```
+
+- `${DATABASE_URL:jdbc:postgresql://...}` reads the environment variable `DATABASE_URL`, and
+  uses the text after the colon when it is not set. `${VAR}` with no default is an error when
+  the variable is missing.
+- `jdbcUrl` keeps Java's form: `jdbc:postgresql://`, `jdbc:mysql://` or `jdbc:mariadb://`. The
+  database type comes from it. The login goes in `username` and `password`, never in the URL:
+  a URL with a login in it is refused, because URLs get logged.
+- Keys may be written in camelCase, kebab-case or snake_case. A key ekbatan does not know is
+  an error that names it, so a typo does not pass silently.
+- The file is JSON. ekbatan has no YAML or TOML reader. If you keep your settings in another
+  format, parse it into a `serde_json::Value` yourself and pass it to `EkbatanConfig::from_tree`.
+
+Reading it is one call:
+
+```rust
+let path = std::env::var("EKBATAN_CONFIG").unwrap_or_else(|_| "ekbatan.json".to_owned());
+let config = EkbatanConfig::load_json(&path)?;
+```
+
+The full list of keys is in [Config files](/reference/config-files/), and the connection
+settings in [Connecting](/reference/connecting/).
+
+## Migrate before anything opens a pool
+
+**Blocking**
+
+```rust
+let sharding = config
+    .sharding
+    .as_ref()
+    .ok_or_else(|| Error::Config("ekbatan.sharding is required".to_owned()))?;
+// Migrations have no blocking twin: block_on runs the async call to its end.
+block_on(
+    Migrator::builder()
+        .with_sharding_config(sharding)
+        .locations([concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")])
+        .migrate(),
+)?;
+
+let registry = Arc::new(DatabaseRegistry::from_sharding_config(sharding)?);
+```
+
+**Async**
+
+```rust
+let sharding = config
+    .sharding
+    .as_ref()
+    .ok_or_else(|| Error::Config("ekbatan.sharding is required".to_owned()))?;
+let migrations = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+Migrator::builder()
+    .with_sharding_config(sharding)
+    .locations([migrations])
+    .migrate()
+    .await?;
+
+let registry = Arc::new(DatabaseRegistry::from_sharding_config(sharding)?);
+```
+
+The migrations are plain SQL files with Flyway's names (`V0001__eventlog.sql`), applied by
+sqlx's migrator from inside your program. There is no separate tool to install.
+
+- Each shard's primary database is migrated in turn. The first failure stops the run, and the
+  log names the shards that were already migrated.
+- Each applied file is recorded in `_sqlx_migrations` with a checksum. An applied file that has
+  since been edited, or deleted, is refused, so the files and the database never quietly
+  disagree.
+- The database is locked while it is migrated, so several replicas starting at once is safe:
+  one migrates, the others wait.
+- `embed_migrations!("migrations")` builds the files into the binary, so a deployed service
+  needs no `migrations` folder beside it.
+
+`DatabaseRegistry::from_sharding_config` opens no connection yet: each pool connects on first
+use. So the order is a rule you keep, not one ekbatan checks: migrate first, then serve.
+See [Migrations](/reference/migrations/).
+
+## Register what exists
+
+**Blocking**
+
+```rust
+let wallets = Arc::new(WalletRepository::new(registry.clone()));
+let notifications = Arc::new(NotificationRepository::new(registry.clone()));
+let executor = Arc::new(
+    ActionExecutor::builder()
+        .namespace(config.namespace.clone().unwrap_or_default())
+        .database_registry(registry.clone())
+        .action_registry(
+            ActionRegistry::builder()
+                .with_action(WalletCreateAction::new(Arc::new(SystemClock)))
+                .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+                .with_action(CreateNotificationAction)
+                .build(),
+        )
+        .repository_registry(
+            RepositoryRegistry::builder()
+                .with_repository(wallets.clone())
+                .with_repository(notifications.clone())
+                .build(),
+        )
+        .build()?,
+);
+```
+
+**Async**
+
+```rust
+let wallets = Arc::new(WalletRepository::new(registry.clone()));
+let notifications = Arc::new(NotificationRepository::new(registry.clone()));
+let executor = Arc::new(
+    AsyncActionExecutor::builder()
+        .namespace(config.namespace.clone().unwrap_or_default())
+        .database_registry(registry.clone())
+        .action_registry(
+            ActionRegistry::builder()
+                .with_action(WalletCreateAction::new(Arc::new(SystemClock)))
+                .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+                .with_action(WalletCloseAction::new(wallets.clone()))
+                .with_action(CreateNotificationAction)
+                .build(),
+        )
+        .repository_registry(
+            RepositoryRegistry::builder()
+                .with_repository(wallets.clone())
+                .with_repository(notifications.clone())
+                .build(),
+        )
+        .build()?,
+);
+```
+
+The framework knows exactly what you put in a registry, and nothing else. That is a real trade:
+
+- an action you forget to register is not a compile error. It fails when it is executed, with
+  `Error::Invalid("No action registered for class ...")`;
+- against that, this one function tells you everything the program contains.
+
+`namespace` is written on every event row: it is how a reader tells one service's events from
+another's. It must be **dot-separated names** of letters, digits and underscores, such as `example.wallet`.
+A hyphen is refused when the executor is built, because the namespace is used downstream as a
+package name where a hyphen is not allowed. Write `my_service`, not `my-service`. An empty
+namespace is refused too.
+
+## Three pools, and why
+
+One database gets three pools. Each is built from one of the member's named `configs`:
+
+```rust
+// Locks and jobs live on the default shard's database, each on its own pool.
+let home = sharding
+    .member(sharding.default_shard)
+    .ok_or_else(|| Error::Config("the default shard has no member".to_owned()))?;
+let pool_for = |name: &str| {
+    let config = home.config_for(name).unwrap_or(home.primary_config());
+    ConnectionProvider::from_config(config)
+};
+let locks = Arc::new(SqlKeyedLockProvider::new(pool_for("lockConfig")?));
+```
+
+| pool | used by | sized for | why it is separate |
+| --- | --- | --- | --- |
+| **`primaryConfig`** | requests: the executor and the repositories | requests waiting on the database at once | the ordinary one |
+| **`jobsConfig`** | the job scheduler: finding due jobs, claiming them, stamping heartbeats | a handful; the examples use 5 | if requests take every connection, the heartbeat cannot be written. **A job whose heartbeat stops for 60 seconds is taken for dead and run again on another instance** |
+| **`lockConfig`** | keyed locks | the most locks held at the same time; the examples use 30 | a held lock keeps its connection for as long as it is held: the lock belongs to that connection's session (`pg_advisory_lock`, or `GET_LOCK` on MySQL and MariaDB) |
+
+Two things are easy to miss:
+
+- **the jobs pool is the scheduler's, not the jobs' own.** The work inside a job uses whatever
+  your job was given. The local event handler's jobs, for example, read and write the events
+  through the `DatabaseRegistry`, so they use the primary pools;
+- **`unwrap_or(home.primary_config())`** is the example's choice, not ekbatan's: when a config
+  is missing it builds another pool from the `primaryConfig` settings. That is still a separate
+  pool, with its own connections.
+
+The lock provider and the job registry live on the default shard's database, even when there
+are several shards. See [Keyed locks](/reference/keyed-locks/) and
+[Distributed jobs](/reference/jobs/distributed-jobs/).
+
+## The jobs and the event handler
+
+**Blocking**
+
+```rust
+let jobs_config = match &config.jobs {
+    Some(section) => JobsConfig::from_value(section)?,
+    None => JobsConfig::default(),
+};
+let handler_config = match &config.local_event_handler {
+    Some(section) => LocalEventHandlerConfig::from_value(section)?,
+    None => LocalEventHandlerConfig::default(),
+};
+let mut jobs = JobRegistry::builder()
+    .connection_provider(pool_for("jobsConfig")?)
+    .jobs_config(&jobs_config)
+    .with_job(WalletReportJob::new(wallets.clone()))
+    .with_job(WalletStipendJob::new(executor.clone(), locks, wallets.clone()));
+if handler_config.handling_enabled {
+    let handlers = || {
+        EventHandlerRegistry::builder()
+            .with_handler(WalletMoneyDepositedEventHandler::new(executor.clone()))
+            .build()
+    };
+    jobs = jobs
+        .with_job(handler_config.fanout_job(EventFanoutJob::new(registry.clone(), handlers()?)))
+        .with_job(handler_config.handling_job(EventHandlingJob::new(registry.clone(), handlers()?)));
+}
+let jobs = jobs.build()?;
+block_on(jobs.start())?;
+```
+
+**Async**
+
+```rust
+let jobs_config = match &config.jobs {
+    Some(section) => JobsConfig::from_value(section)?,
+    None => JobsConfig::default(),
+};
+let mut jobs = JobRegistry::builder()
+    .connection_provider(pool_for("jobsConfig")?)
+    .jobs_config(&jobs_config);
+let handler_config = match &config.local_event_handler {
+    Some(section) => LocalEventHandlerConfig::from_value(section)?,
+    None => LocalEventHandlerConfig::default(),
+};
+if handler_config.handling_enabled {
+    let handlers = || {
+        EventHandlerRegistry::builder()
+            .with_handler(WalletMoneyDepositedEventHandler::new(executor.clone()))
+            .build()
+    };
+    jobs = jobs
+        .with_job(handler_config.fanout_job(EventFanoutJob::new(registry.clone(), handlers()?)))
+        .with_job(handler_config.handling_job(EventHandlingJob::new(registry.clone(), handlers()?)));
+}
+let jobs = jobs.build()?;
+jobs.start().await?;
+```
+
+`ekbatan.jobs` and `ekbatan.local-event-handler` are read here, by the app, not by ekbatan on
+its own. The event handler stays off until `local-event-handler.handling.enabled` is `true`.
+
+`jobs.start()` writes a row in `scheduled_tasks` for each job that has none, and fails if it
+cannot - a missing table, or a pool without write access - rather than leaving jobs that never
+run. Then it starts polling. [Consuming events](/learn/consuming-events/), next in this path,
+is about the handler itself.
+
+## Start and stop
+
+**Blocking**
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::var("EKBATAN_CONFIG").unwrap_or_else(|_| "ekbatan.json".to_owned());
+    let config = EkbatanConfig::load_json(&path)?;
+    let worker = Worker::start(&config)?;
+
+    let (stop, stopped) = mpsc::channel();
+    ctrlc_on(stop);
+    let _ = stopped.recv();
+    worker.stop();
+    Ok(())
+}
+
+/// Sends on `stop` at Ctrl-C (SIGINT) or SIGTERM.
+fn ctrlc_on(stop: mpsc::Sender<()>) {
+    ekbatan::blocking::runtime().spawn(async move {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        let _ = stop.send(());
+    });
+}
+```
+
+**Async**
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::var("EKBATAN_CONFIG").unwrap_or_else(|_| "ekbatan.json".to_owned());
+    let config = EkbatanConfig::load_json(&path)?;
+    let app = App::start(&config).await?;
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_owned());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    axum::serve(listener, app.router.clone())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+
+    app.stop().await;
+    Ok(())
+}
+```
+
+The order matters: **stop taking work before closing what the work runs on.**
+
+1. stop serving: axum's graceful shutdown lets requests in flight finish;
+2. `jobs.stop()`: no new job starts, and running ones get up to `shutdownMaxWait` to finish;
+3. close the `DatabaseRegistry`, which closes every shard's pools.
+
+Three things to know before you copy this:
+
+- **The async example stops on Ctrl-C only.** A container platform stops a program with
+  SIGTERM, and a Rust program that does not handle it is ended at once: no graceful shutdown,
+  and `jobs.stop()` never runs. Wait for SIGTERM as well, as the worker does.
+- **`shutdownMaxWait` is 30 minutes unless you set it** (`ekbatan.jobs.shutdownMaxWait`, an
+  ISO-8601 duration such as `"PT20S"`). Set it below the time your platform gives a stopping
+  program. A job still running after that is abandoned, and its slot is run again on another
+  instance once its heartbeat is a minute old.
+- **The lock and jobs pools are not closed by these examples.** They end with the process. To
+  close them yourself, keep a clone of each `ConnectionProvider` (a clone shares the same pool)
+  and call `close().await` on it after `jobs.stop()`.
+
+## Under axum
+
+The executor, the lock provider and the repositories go in the router's state, behind `Arc`:
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub executor: Arc<AsyncActionExecutor>,
+    pub locks: Arc<dyn AsyncKeyedLockProvider>,
+    pub wallets: Arc<WalletRepository>,
+}
+```
+
+An `ekbatan::Error` becomes an HTTP answer in one place:
+
+```rust
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self.0 {
+            Error::NotFound { .. } => StatusCode::NOT_FOUND,
+            Error::Invalid(_) | Error::Action(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Error::StaleRecord { .. } | Error::StaleRecords { .. } => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        // ...
+    }
+}
+```
+
+And the deposit takes the wallet's keyed lock around the whole action, so two deposits to one
+wallet run one after the other instead of one failing on the optimistic lock:
+
+```rust
+let lease = state
+    .locks
+    .acquire(&format!("wallet:{id}"), DEPOSIT_LOCK_MAX_HOLD)
+    .await?;
+let deposited = state
+    .executor
+    .execute::<WalletDepositMoneyAction>(Some(PRINCIPAL), params)
+    .await;
+lease.release().await;
+Ok(Json(WalletResponse::from(&deposited?)))
+```
+
+The result is kept, the lease released, and only then is the error returned. A lease that is
+dropped without `release()` is still released, in the background; `max_hold` is the safety net
+for a holder that hangs. `acquire` waits as long as the key is held; `try_acquire` takes a
+`max_wait` and gives `None` when the key stayed taken, which suits an endpoint that would
+rather answer "busy, retry".
+
+**Never call `ekbatan::blocking` from an axum handler.** See
+[Blocking or async?](/learn/blocking-or-async/#the-one-mistake-the-blocking-api-inside-async-code).
+
+## See also
+
+- [Going to production](/learn/going-to-production/) - pool sizes, shutdown and signals in a
+  real deployment
+- Reference: [Config files](/reference/config-files/), [Connecting](/reference/connecting/),
+  [Migrations](/reference/migrations/), [Keyed locks](/reference/keyed-locks/),
+  [Distributed jobs](/reference/jobs/distributed-jobs/),
+  [Action executor](/reference/action-executor/)

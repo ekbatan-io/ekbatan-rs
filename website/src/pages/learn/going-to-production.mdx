@@ -1,0 +1,237 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Going to production
+activeSection: learn
+lead: Migrations at deploy, TLS, pools, shutdown, what to watch in traces and metrics, and what ekbatan does not do for you yet.
+---
+
+import LearnPager from "../../components/LearnPager.astro";
+
+## First, the one way to use this wrongly
+
+If you read one thing on this page, read this: **never call `ekbatan::blocking` from async
+code.** In an axum handler, or anything else running on tokio, a blocking call holds a runtime
+thread until the database answers. On the multi-threaded runtime that slows every request that
+was going to run on that thread; on a single-threaded runtime it panics. Nothing catches it at
+compile time.
+
+Use `ekbatan::aio` in async code, and the blocking API only where there is no async code at
+all. [Blocking or async?](/learn/blocking-or-async/) has the whole rule.
+
+## Count your connections
+
+Each running copy of your service opens its own pools. With the wiring from
+[Wiring a service](/learn/wiring-a-service/), one copy opens up to:
+
+```
+for every shard:          primaryConfig.maximumPoolSize
+on the default shard:   + jobsConfig.maximumPoolSize + lockConfig.maximumPoolSize
+```
+
+The examples use 20 + 5 + 30 = 55 on a single database. Three replicas make that 165, against
+the default shard's `max_connections`. **Size per copy, then multiply by the number of copies**
+before you compare with what the database allows. A pool opens connections only as they are
+needed, so you may not see the total until the first busy hour.
+
+What happens when a pool is empty:
+
+- a request waits for a free connection up to `connectionTimeout` (in milliseconds; sqlx's
+  default is 30 seconds), then fails with `Error::Database(sqlx::Error::PoolTimedOut)`. The
+  examples turn that into a 500. In your service, answer 503 with `Retry-After` instead: it is
+  load, not a bug;
+- a keyed lock waits for a connection from the lock pool the same way. Every held lock keeps
+  one, so `lockConfig.maximumPoolSize` is the most locks held at once, per copy;
+- the job scheduler needs very few connections, but needs them on time. Keep its pool apart
+  from requests, as the examples do: a job whose heartbeat cannot be written for 60 seconds is
+  taken for dead and run again on another copy.
+
+Every copy also runs the job scheduler. That is fine, and it is the point: each job runs once
+per slot across all copies, whichever claims it first. If you would rather not have every web
+server run jobs, start the `JobRegistry` only in a separate worker process, like
+`job-worker-pg`.
+
+## Migrations
+
+Running them at startup, as the examples do, is safe with several copies: each database is
+locked while it is migrated, one copy migrates and the others wait.
+
+Once you are past the first deploys, consider a separate step instead: a small binary, or a flag
+on your service, that calls `Migrator::builder()...migrate()` and exits. Then a migration that
+fails stops the deploy, not the service, and the service starts only against a schema that is
+ready.
+
+Either way:
+
+- `migrate` visits shards in config order, **stops at the first failure, and logs the shards it
+  had already migrated**. Half-migrated shards are a state an operator has to reason about, so
+  the log says which half;
+- an applied file that has since been edited or deleted is refused. Fix forward with a new
+  file;
+- migrate each primary over a **direct connection**. A pooler in front of the database, such as
+  PgBouncer in transaction mode, drops the session lock the migration relies on;
+- the history is kept in `_sqlx_migrations`. A database migrated by Java's Flyway (which keeps
+  `flyway_schema_history`) is not seen as migrated here, and the other way round. Do not point
+  both at one database's schema history;
+- build the files into the binary with `embed_migrations!("migrations")`, so the deployed
+  service does not need a `migrations` folder beside it.
+
+See [Migrations](/reference/migrations/).
+
+## TLS
+
+Connections are encrypted with rustls. There is no OpenSSL to install, and the trusted root
+certificates are Mozilla's, built into the binary: the operating system's certificate store is
+not read.
+
+The settings go in each pool's `dataSourceProperties`, by the database driver's own names:
+
+| | PostgreSQL | MySQL and MariaDB |
+| --- | --- | --- |
+| mode | `sslmode` | `sslmode` |
+| default | `prefer` | `preferred` |
+| encrypt, do not check the certificate | `require` | `required` |
+| encrypt and check the certificate and host | `verify-full` | `verify_identity` |
+| your own certificate authority | `sslrootcert` | `sslca` |
+| client certificate and key | `sslcert`, `sslkey` | `sslcert`, `sslkey` |
+
+**The default encrypts when the server offers it, without checking the certificate.** That stops
+someone reading the traffic, but not someone pretending to be the database. In production, set
+`verify-full` (PostgreSQL) or `verify_identity` (MySQL, MariaDB), and `sslrootcert` / `sslca`
+when your database's certificate comes from a private authority:
+
+```json
+"primaryConfig": {
+  "jdbcUrl": "${DATABASE_URL}",
+  "username": "${DATABASE_USER}",
+  "password": "${DATABASE_PASSWORD}",
+  "dataSourceProperties": {
+    "sslmode": "verify-full",
+    "sslrootcert": "/etc/ssl/db/ca.pem"
+  }
+}
+```
+
+**MySQL 8.4 password logins need TLS.** Its default login method sends the password only over
+TLS (or with an RSA exchange, which ekbatan does not support). With TLS turned off
+(`sslmode: disabled`), a password's first login is refused. Leave TLS on.
+
+Passwords are never printed: not in a `Debug` output, a log line or an error. Every
+`dataSourceProperties` value is treated as a secret too. See [Connecting](/reference/connecting/)
+and [MySQL](/reference/dialects/mysql/).
+
+## Shutdown
+
+A container platform stops a program with SIGTERM, then kills it after a grace period
+(Kubernetes gives 30 seconds by default). Three settings have to agree with that.
+
+**Handle SIGTERM.** A Rust program that does not handle it is ended at once: requests in flight
+are cut, `jobs.stop()` never runs, and connections are dropped. The REST examples stop on
+Ctrl-C only; the `job-worker-pg` example waits for both, which is what you want:
+
+```rust
+let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+tokio::select! {
+    _ = tokio::signal::ctrl_c() => {}
+    _ = term.recv() => {}
+}
+```
+
+**Set `shutdownMaxWait` below the grace period.** `jobs.stop()` lets running jobs finish, for
+up to `ekbatan.jobs.shutdownMaxWait`. **It is 30 minutes unless you set it.** Set it so that
+stopping the jobs and closing the pools fits in the grace period:
+
+```json
+"jobs": { "shutdownMaxWait": "PT20S" }
+```
+
+**Write jobs that are safe to run twice.** A job still running when the wait ends is
+abandoned. Its row keeps the last heartbeat, and once that is 60 seconds old (a heartbeat every
+10 seconds, dead after 6 missed) another copy runs the slot again. The same happens after a
+crash, or when a copy stalls long enough to miss its heartbeats while still running.
+
+The local event handler's jobs end on their own when the registry stops: they check between
+rounds. A handler in the middle of a delivery finishes it, or is cut off and delivered again
+later. Handlers are at least once anyway.
+
+## What to watch
+
+ekbatan reports through OpenTelemetry. It depends only on OpenTelemetry's API, which does
+nothing until your program installs an SDK
+(`opentelemetry::global::set_tracer_provider` and `set_meter_provider`). Until then, the spans
+and metrics go nowhere. The names are the same as in Ekbatan for Java, so one dashboard reads
+both.
+
+**Traces** (scope `io.ekbatan.core`): `ekbatan.action.execute` around each action, with its
+name, principal, outcome and retry count; `ekbatan.action.perform` and `ekbatan.action.persist`
+inside it; `ekbatan.transaction` per shard, with the shard; `ekbatan.event.persist`; and
+`ekbatan.repository` on batch inserts and updates. A failed span has status `ERROR` and the
+error recorded on it.
+
+**Metrics** (scope `io.ekbatan.events.localeventhandler`): `ekbatan.events.fanned_out`,
+`ekbatan.events.notifications_created`, `ekbatan.events.handled` (by `outcome` and `handler`),
+`ekbatan.events.handler.duration`, and `ekbatan.events.delivery.lag`.
+
+**Logs** go through the `tracing` crate. Your program chooses where they go, with a subscriber;
+the examples use `tracing-subscriber` and `RUST_LOG`.
+
+Three alerts are worth more than any dashboard:
+
+- **`ekbatan.events.delivery.lag` rising steadily.** A shard falling behind still reports
+  healthy success counts, so **no counter shows a growing backlog**. Only the lag does.
+- **`ekbatan.events.handled{outcome="expired_postfailure"}` above zero means events were given
+  up on.** A delivery reaches that state only after failing for the whole retention window,
+  7 days by default.
+- **A steady stream of `failed_retry` on one handler** usually means that handler cannot succeed
+  at all. Catching it here takes minutes; the alert above fires only a week later, when the
+  events are already lost.
+
+Also look for the log line `CRITICAL: Cross-shard action ... PARTIALLY COMMITTED!`, and its
+span attribute `ekbatan.shard.partial_commit_failure`. It appears only if you allowed a
+cross-shard action, and it means some shards committed and one did not. See
+[Observability](/reference/runtime/observability/).
+
+## Time
+
+Keep everything in UTC: the code, the columns and the database server. ekbatan's `Instant` is
+UTC, the framework's tables use time columns without a time zone (`TIMESTAMP` on PostgreSQL,
+`DATETIME(6)` on MySQL and MariaDB), and the examples'
+databases run with `TZ: UTC`.
+
+## What ekbatan does not do for you yet
+
+- **It is not on crates.io yet.**
+- **The config file is JSON only.** No YAML or TOML reader is built in; parse another format
+  into a `serde_json::Value` yourself and pass it to `EkbatanConfig::from_tree`.
+- **No streaming out.** No Kafka client, no Debezium transform, no Avro or Protobuf encoding.
+  Streaming events to other services means reading `eventlog.events` with a tool of your own
+  choosing. See [Consuming events](/learn/consuming-events/#path-b---streaming-the-table-out).
+- **No Redis keyed lock.** Locks are in-process, or held by PostgreSQL, MySQL or MariaDB.
+- **Keyed locks are not re-entrant.** A task that takes a key it already holds waits for itself.
+- **No connection leak detection.** `leakDetectionThreshold` is accepted, so Java's config files
+  load, but it does nothing.
+- **No cron schedules.** A job runs at a fixed delay, or daily at set times in UTC.
+- **A changed schedule does not move a job's next run.** When a job's schedule changes between
+  deploys, its row keeps the next run time it already had; the new schedule applies from the
+  run after.
+- **No sharding strategy of your own.** `NoSharding` and `EmbeddedBits` are the two there are.
+- **Some calls are async only.** Migrations, starting and stopping the `JobRegistry`, and a
+  few event-log functions have no blocking twin; blocking code runs them with
+  `ekbatan::blocking::block_on`.
+- **A panic in a job or a handler is caught** and counts as a failure: a job's run is recorded
+  as failed and its next slot is scheduled; a handler's delivery is retried with backoff. Still,
+  return an `Err` for anything that can fail and keep panics for bugs.
+- **JSON columns in your own tables are not mapped yet** by the schema generator; it refuses
+  them unless a `ForcedType` rule names a Rust type.
+
+**And one thing that is not a gap in the code:** this port has not run in production yet. Its
+tests pass on PostgreSQL, MySQL and MariaDB, against real databases, but a passing test suite
+is not the same as a service proven under real load.
+
+<LearnPager current="going-to-production" />
+
+## See also
+
+- [Wiring a service](/learn/wiring-a-service/) - the pools, the start and the stop
+- Reference: [Connecting](/reference/connecting/), [Config files](/reference/config-files/),
+  [Migrations](/reference/migrations/), [Distributed jobs](/reference/jobs/distributed-jobs/),
+  [Keyed locks](/reference/keyed-locks/), [Observability](/reference/runtime/observability/)

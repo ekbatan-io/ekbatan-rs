@@ -1,0 +1,244 @@
+# TransactionManager
+
+A TransactionManager runs database transactions on one shard. Business changes - anything that changes a model and emits events - go through the executor. This is for the other work that needs a transaction: a backfill, a startup check, a few writes with no event worth recording.
+
+The executor uses the same transactions inside. A transaction holds one connection from the
+shard's primary pool from start to end. You pass it to each repository call that should be part
+of it; nothing joins a transaction on its own.
+
+## What it holds
+
+You rarely build one yourself. Get it from the registry:
+
+```rust
+let manager = registry.transaction_manager(MEXICO_SHARD)?;   // one shard
+let manager = registry.default_transaction_manager();        // the default shard
+for manager in registry.all_transaction_managers() { ... }   // every shard, in order
+```
+
+`transaction_manager(shard)` applies the registry's
+[unknown-shard policy](/reference/sharding/): a shard it doesn't have goes to the default shard,
+or is refused with `Error::UnknownShard`.
+
+Each one holds, for exactly one shard:
+
+```rust
+impl TransactionManager {
+    pub fn new(
+        shard_identifier: ShardIdentifier,
+        primary: ConnectionProvider,
+        secondary: Option<ConnectionProvider>,
+    ) -> Self;
+
+    pub fn shard_identifier(&self) -> ShardIdentifier;
+    pub fn dialect(&self) -> Dialect;                              // the primary's
+    pub fn primary_connection_provider(&self) -> &ConnectionProvider;
+    pub fn secondary_connection_provider(&self) -> &ConnectionProvider;
+    pub fn as_async(&self) -> AsyncTransactionManager<'_>;
+}
+```
+
+- **Two pools**: the primary's, and the replica's. With no replica (`None`), replica reads use
+  the primary's pool. A `ConnectionProvider` is one database's pool; see
+  [Connecting](/reference/connecting/).
+- **The shard** it belongs to. It names the `ekbatan.transaction` span, and it is what a
+  transaction is checked against when a repository writes through it.
+
+`begin` and `in_transaction` are on the manager itself for blocking code. For async code,
+`manager.as_async()` gives an `AsyncTransactionManager` with the same two, awaited.
+
+## Opening a transaction
+
+`in_transaction` runs a block in a transaction. It commits if the block returns `Ok`, and rolls
+back if it returns `Err`, giving back the block's error:
+
+**Blocking**
+
+```rust
+let manager = registry.transaction_manager(GLOBAL_SHARD)?;
+manager.in_transaction(|tx| {
+    let added = wallets.add(Some(tx), &wallet)?;
+    wallets.update(Some(tx), &added.deposit(Decimal::ONE)?)
+})?;
+```
+
+**Async**
+
+```rust
+let manager = registry.transaction_manager(MEXICO_SHARD)?;
+manager
+    .as_async()
+    .in_transaction(async |tx| {
+        wallets.add(Some(tx), &extra).await?;
+        wallets.mark_all_settled(Some(tx), &[*mexico.id()]).await?;
+        Ok(())
+    })
+    .await?;
+```
+
+Both writes commit together or neither does. That is the same all-or-nothing an action gives,
+without the rest of what an action does: no plan, no event rows, no retry when a version race is
+lost.
+
+The blocking block is a closure, `FnOnce(&mut Transaction) -> Result<R, Error>`. The async one
+is an async closure, `async |tx| { ... }`, given a `&mut AsyncTransaction`.
+
+### begin, commit, rollback
+
+`begin()` opens a transaction and hands it to you. You end it:
+
+**Blocking**
+
+```rust
+let mut tx = manager.begin()?;
+wallets.add(Some(&mut tx), &wallet)?;
+tx.db().execute(&audit_insert)?;
+tx.commit()?;
+```
+
+**Async**
+
+```rust
+let mut tx = manager.as_async().begin().await?;
+wallets.add(Some(&mut tx), &wallet).await?;
+tx.db().execute(&audit_insert).await?;
+tx.commit().await?;
+```
+
+`commit()` and `rollback()` take the transaction by value, so it can't be used after it ended.
+
+A transaction **dropped without either** - an early `return`, a `?`, a panic, or in async code a
+future that was dropped (a cancelled request, a timeout) - has its connection closed rather than
+returned to the pool. The database rolls back what a closed connection leaves open, and no one
+else ever gets that connection.
+
+## Using a transaction
+
+```rust
+// ekbatan::blocking::Transaction (ekbatan::aio::AsyncTransaction is the same, awaited)
+impl Transaction {
+    pub fn shard(&self) -> ShardIdentifier;
+    pub fn db(&mut self) -> Db<'_>;                       // statements inside the transaction
+    pub fn as_async(&mut self) -> &mut AsyncTransaction;  // for an async call that takes one
+    pub fn commit(self) -> Result<(), Error>;
+    pub fn rollback(self) -> Result<(), Error>;
+}
+```
+
+- **Repository calls join it when you pass it**: `wallets.add(Some(tx), &wallet)`. With `None`,
+  the same call runs on its own and commits at once. Nothing joins a transaction because it
+  happens to be open.
+- **`tx.db()`** runs your own sea-query statements inside it. See
+  [Repository: What a Db runs](/reference/repository/#what-a-db-runs).
+- **One shard only.** A repository refuses a transaction on another shard than the row's, with
+  `Error::WrongShard`.
+
+The ready-made reads (`find_by_id`, `find_all_where`, ...) take no transaction: they read
+committed data on the primary, and don't see this transaction's own writes. To read inside the
+transaction, write the query with `tx_db(tx, key)` or `tx.db()`.
+
+## What a transaction does, step by step
+
+1. Borrow a connection from the shard's **primary** pool.
+2. `BEGIN` (`START TRANSACTION` on MySQL and MariaDB).
+3. Run your statements on that one connection.
+4. `COMMIT`, and give the connection back.
+
+**A failed `COMMIT`** is followed by a `ROLLBACK`. If that works, the connection is clean and goes
+back to the pool. The commit's error is returned.
+
+**A failed `ROLLBACK`** - after a failed commit, or your own `rollback()` - closes the connection
+instead of returning it, so no one inherits a half-finished transaction. The database discards
+what was pending.
+
+**A failed `BEGIN`** throws that connection away too.
+
+## No nesting
+
+There are no nested transactions or savepoints. Calling `begin()` again, or `in_transaction`
+inside another one, opens a **second** transaction on a **second** connection. It commits on
+its own:
+
+- it doesn't see the first one's uncommitted rows;
+- its commit stands even if the first one then rolls back;
+- writing a row the first one has locked waits for a lock its own caller holds - until the
+  database's lock timeout.
+
+An action run inside your transaction is the same case: the executor opens its own transaction,
+commits it, and that stays committed if yours then rolls back.
+
+Do the work in one transaction, and pass that one everywhere.
+
+## When not to use it
+
+If the work changes a model and emits an event, **write an action instead.** An action writes
+the event rows in the same transaction as the rows they describe, which is what the framework is
+for. It also gives you retries when a version race is lost, the cross-shard check, and tracing.
+
+Reach for a transaction when the work does not fit an action:
+
+- start-up or shutdown work: default rows, a sanity check;
+- admin scripts: backfills, one-off fixes, exports;
+- several reads that must see one consistent state;
+- maintenance writes where one event per row would only be noise.
+
+## Reading without a transaction
+
+To only read, you need no transaction:
+
+**Blocking**
+
+```rust
+let mut db = registry.primary(shard)?;      // the primary: the latest committed state
+let mut db = registry.secondary(shard)?;    // the replica: may lag; the primary if none
+let all = registry.primaries();             // every shard's primary, as Dbs
+```
+
+**Async**
+
+```rust
+let mut db = registry.as_async().primary(shard)?;
+let mut db = registry.as_async().secondary(shard)?;
+let all = registry.as_async().primaries();
+```
+
+Each statement on these borrows a connection from the pool while it runs, and commits on its
+own. A repository's `db(key)` and `readonly_db(key)` give the same, picking the shard from an id.
+
+## Cross-shard
+
+A transaction is **on one shard**, and there is no two-phase commit. Writes on two shards can't
+be made all-or-nothing:
+
+**Blocking**
+
+```rust
+registry.transaction_manager(GLOBAL_SHARD)?.in_transaction(|_tx| { /* work A */ Ok(()) })?;
+registry.transaction_manager(MEXICO_SHARD)?.in_transaction(|_tx| { /* work B */ Ok(()) })?;
+// if B fails, A is already committed.
+```
+
+**Async**
+
+```rust
+registry.as_async().transaction_manager(GLOBAL_SHARD)?
+    .in_transaction(async |_tx| { /* work A */ Ok(()) }).await?;
+registry.as_async().transaction_manager(MEXICO_SHARD)?
+    .in_transaction(async |_tx| { /* work B */ Ok(()) }).await?;
+// if B fails, A is already committed.
+```
+
+That is the same risk as `allow_cross_shard(true)` on an action. If a partial commit would need
+undoing, use a [saga](/learn/sagas/).
+
+## Tracing
+
+Each `in_transaction` is one `ekbatan.transaction` span, with `ekbatan.shard.group` and
+`ekbatan.shard.member`. A transaction opened with `begin()` makes no span. See
+[Observability](/reference/runtime/observability/).
+
+## See also
+
+- [Action](/reference/action/) - the usual way to write, which uses this inside
+- [Repository](/reference/repository/) - what takes a transaction, and what doesn't
+- [Sharding](/reference/sharding/) - one manager per shard

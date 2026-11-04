@@ -1,0 +1,199 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Testing
+activeSection: reference
+lead: "ActionSpec runs an action's perform() on a fresh plan, with no executor and no transaction, and hands back an ActionAssert to check what it staged, what events it carried and what it returned. VirtualClock is a clock a test can freeze and move."
+---
+
+import ModeTabs from "../../components/ModeTabs.astro";
+
+These live in the `ekbatan-test-support` crate. It is not on crates.io yet; add it as a
+dev-dependency by path or git, next to `ekbatan`:
+
+```toml
+[dev-dependencies]
+ekbatan-test-support = { path = "../ekbatan-test-support" }
+```
+
+## ActionSpec
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+use ekbatan_test_support::blocking::ActionSpec;
+
+#[test]
+fn opens_a_wallet() {
+    ActionSpec::of(&SyncOpen)
+        .execute(params(Decimal::ONE))
+        .assert_added_one::<Wallet>(|wallet| assert_eq!(*wallet.balance(), Decimal::ONE))
+        .assert_emitted::<WalletCreatedEvent>()
+        .assert_no_updates();
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+use ekbatan_test_support::aio::AsyncActionSpec;
+
+#[tokio::test]
+async fn create_stages_one_wallet_and_its_event() {
+    let clock = Arc::new(VirtualClock::new());
+    clock.pause();
+    let action = WalletCreateAction::new(clock.clone());
+    AsyncActionSpec::of(&action)
+        .with_principal("alice")
+        .execute(wallet_create_action::Params {
+            country_code: Some("mx".to_owned()),
+            owner_id: owner,
+            currency: "MXN".to_owned(),
+            initial_balance: Decimal::TEN,
+        })
+        .await
+        .assert_added_one::<Wallet>(|wallet| {
+            assert_eq!(wallet.id().shard(), MEXICO_SHARD);
+            assert_eq!(wallet.state(), WalletState::Opened);
+        })
+        .assert_no_updates()
+        .assert_emitted_one::<WalletCreatedEvent>(|event| {
+            assert_eq!(event.initial_balance, Decimal::TEN);
+        })
+        .assert_no_changes_of::<Notification>()
+        .assert_result(|wallet| assert_eq!(wallet.version(), 1));
+}
+```
+
+</div>
+</ModeTabs>
+
+`ekbatan_test_support::blocking::ActionSpec` runs a blocking `Action`, on the test's own thread,
+in a plain `#[test]`. `ekbatan_test_support::aio::AsyncActionSpec` runs an `AsyncAction`, and its
+calls are awaited. Both have the same methods:
+
+| method | |
+|---|---|
+| `of(&action)` | the action to run: an instance you built, not registered anywhere |
+| `with_principal("alice")` | the principal `perform()` receives. Default `None` |
+| `execute(params)` | runs `perform()` on a new plan and returns an `ActionAssert`. **Panics** if `perform()` returns `Err` |
+| `execute_err(params)` | runs it, expects an `Err`, and returns the `Error`. Panics if it succeeds |
+| `assert_fails_with::<E>(params, verifier)` | expects `Error::Action` holding an `E` (your own error, from `Error::action(...)`), and hands it to `verifier` |
+
+What it does and doesn't do:
+
+- **Nothing is written.** There is no executor and no transaction. The plan is only looked at.
+- **`perform()` runs for real.** Reads inside it still run: an action that reads through a
+  repository needs a database in its test. An action that only builds and stages, like
+  `WalletCreateAction`, needs none.
+- **No retries, no params check, no event rows.** Those are the executor's, and are tested with
+  it.
+
+```rust
+let error = AsyncActionSpec::of(&CreateNotificationAction)
+    .execute_err(create_notification_action::Params {
+        wallet_id: Uuid::new_v4(),
+        kind: "DEPOSIT".to_owned(),
+        recipient: " ".to_owned(),
+        message: "hi".to_owned(),
+    })
+    .await;
+assert!(matches!(error, Error::Invalid(m) if m == "recipient cannot be blank"));
+```
+
+```rust
+ActionSpec::of(&SyncOpen)
+    .assert_fails_with::<NoNegativeBalance>(params(Decimal::NEGATIVE_ONE), |error| {
+        assert!(error.to_string().contains("negative"))
+    });
+```
+
+## ActionAssert
+
+What `execute` returns: the action's result and the plan it staged on. Every `assert_*` method
+returns `&Self`, so they chain. A failed check **panics** with a message naming the type, such as
+`Expected exactly 1 update of Wallet but found 0`, which fails the test.
+
+**Additions**
+
+| method | passes when |
+|---|---|
+| `assert_added_one::<E>(\|e\| ...)` | exactly one `E` was staged for insert; the closure checks it |
+| `assert_added::<E>(count)` | `count` `E`s were staged for insert |
+| `assert_added_with::<E>(count, \|all\| ...)` | the same, and the closure checks the slice |
+| `assert_no_additions()` | nothing of any type was staged for insert |
+| `assert_no_additions_of::<E>()` | no `E` was staged for insert |
+| `assert_total_additions(count)` | `count` inserts were staged, all types together |
+
+**Updates**: `assert_updated_one`, `assert_updated`, `assert_updated_with`, `assert_no_updates`,
+`assert_no_updates_of`, `assert_total_updates`, the same way. The values checked are as staged,
+at the version they were read at, not version + 1.
+
+**Events**
+
+| method | passes when |
+|---|---|
+| `assert_emitted::<V>()` | at least one event of type `V` |
+| `assert_emitted_one::<V>(\|ev\| ...)` | exactly one; the closure checks it |
+| `assert_emitted_count::<V>(count)` | exactly `count` |
+| `assert_emitted_with::<V>(count, \|all\| ...)` | the same, and the closure checks them |
+| `assert_not_emitted::<V>()` | none of type `V` |
+| `assert_no_events()` | no events at all |
+
+The events checked are those carried by every staged model, additions then updates.
+
+**No changes**: `assert_no_changes()` (no additions, no updates, no events) and
+`assert_no_changes_of::<E>()` (no additions or updates of `E`).
+
+**Result and access**
+
+| method | |
+|---|---|
+| `assert_result(\|r\| ...)` | the closure checks the result |
+| `result()` · `into_result()` | the result, borrowed or owned |
+| `additions::<E>()` · `updates::<E>()` | the staged values of one type |
+| `events::<V>()` | the staged events of type `V`, in order |
+| `plan()` | the [`ActionPlan`](/reference/action-plan/) itself |
+
+## VirtualClock
+
+A `Clock` a test can stop, move or shift. Give it to the action, and to the executor in tests
+that use one, so every date comes from it.
+
+```rust
+use ekbatan_test_support::VirtualClock;
+
+let clock = Arc::new(VirtualClock::new());   // real time, until told otherwise
+clock.pause();                               // frozen at now
+clock.advance(TimeDelta::seconds(30))?;      // frozen, 30 s later
+let action = WalletCreateAction::new(clock.clone());
+```
+
+| method | |
+|---|---|
+| `new()` · `default()` | real time, on the system clock |
+| `with_real_clock(Arc<dyn Clock>)` | real time, on another clock |
+| `pause()` | freezes wherever it is now |
+| `pause_at(instant)` | freezes at `instant` |
+| `advance(TimeDelta)` | moves a frozen clock forward. Returns `Err` if the clock is not frozen |
+| `resume_from(instant)` | runs at real speed, starting from `instant` |
+| `resume()` | back to real time |
+
+Each change happens under one lock, so threads that move the clock at the same time lose
+nothing.
+
+A model keeps whole microseconds, so compare a model's date with
+`ekbatan::truncate_to_micros(clock.instant())`, not with `clock.instant()` itself.
+
+## Testing with a database
+
+`ActionSpec` checks what an action decides. What the executor then does - the transaction, the
+event rows, the retries - is tested by running the real executor against a real database. The
+examples start one in Docker with testcontainers; see `wallet-example/tests/actions.rs` in the
+repository.
+
+## See also
+
+- [Action](/reference/action/) · [ActionPlan](/reference/action-plan/)
+- [Learn: Your first action](/learn/your-first-action/)

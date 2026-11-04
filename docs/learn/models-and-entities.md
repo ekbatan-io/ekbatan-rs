@@ -1,0 +1,317 @@
+# Models and entities
+
+Models emit events when they change; entities do not. Which to use, why both are immutable, and what the `#[model]` and `#[entity]` macros write for you.
+
+Both are plain structs with an attribute on top. Both carry an `id`, a `state` and a `version`,
+and both are saved by a repository. The difference is whether their changes are news.
+
+| | `#[model]` | `#[entity]` |
+| --- | :---: | :---: |
+| `id`, `state`, `version` | yes | yes |
+| `created_date` / `updated_date` | yes (`created_date` required) | no |
+| Changes emit events | yes | no |
+
+Choose a **model** when a change should be recorded as an event. Choose an **entity** when the
+current state is enough: lookup tables, settings, records that take part in an action but need no
+history of their own.
+
+Nothing on a model or entity touches the database, so they are the same in blocking and async
+code.
+
+## A model
+
+```rust
+// src/model.rs
+use ekbatan::{Error, Instant, Model, ShardIdentifier, ShardedId, model, model_event};
+use rust_decimal::Decimal;
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalletState {
+    Opened,
+    Closed,
+    Deleted,
+}
+
+#[model(id = ShardedId<Wallet>, state = WalletState)]
+pub struct Wallet {
+    pub owner_id: Uuid,
+    pub currency: String,
+    pub balance: Decimal,
+}
+
+impl Wallet {
+    pub fn create_wallet(
+        shard: ShardIdentifier,
+        owner_id: Uuid,
+        currency: &str,
+        initial_balance: Decimal,
+        created_date: Instant,
+    ) -> WalletBuilder {
+        WalletBuilder::new()
+            .id(ShardedId::generate(shard))
+            .state(WalletState::Opened)
+            .owner_id(owner_id)
+            .currency(currency.to_owned())
+            .balance(initial_balance)
+            .created_date(created_date)
+            .with_initial_version()
+            .with_event(WalletCreatedEvent {
+                owner_id,
+                currency: currency.to_owned(),
+                initial_balance,
+            })
+    }
+
+    pub fn deposit(&self, amount: Decimal) -> Result<Wallet, Error> {
+        if amount <= Decimal::ZERO {
+            return Err(Error::Invalid("Deposit amount must be positive".to_owned()));
+        }
+        let new_balance = self.balance + amount;
+        self.copy()
+            .with_event(WalletMoneyDepositedEvent {
+                amount,
+                new_balance,
+            })
+            .balance(new_balance)
+            .build()
+    }
+
+    pub fn close(&self) -> Result<Wallet, Error> {
+        if self.state() == WalletState::Closed {
+            return Ok(self.clone());
+        }
+        self.copy()
+            .with_event(WalletClosedEvent {})
+            .state(WalletState::Closed)
+            .build()
+    }
+}
+
+#[model_event(Wallet)]
+pub struct WalletCreatedEvent {
+    pub owner_id: Uuid,
+    pub currency: String,
+    pub initial_balance: Decimal,
+}
+
+#[model_event(Wallet)]
+pub struct WalletMoneyDepositedEvent {
+    pub amount: Decimal,
+    pub new_balance: Decimal,
+}
+
+#[model_event(Wallet)]
+pub struct WalletClosedEvent {}
+```
+
+Three patterns are worth naming:
+
+- **A factory**, `create_wallet`, starts a *new* wallet. It sets version 1 with
+  `with_initial_version()` and attaches the creation event. It returns the builder; the action
+  calls `build()`.
+- **`copy()`** returns a builder filled in from the current wallet. A method such as `deposit`
+  sets what changed, attaches an event, and calls `build()`. The old wallet is untouched.
+- **Errors are values.** `deposit` returns `Result`: a refused change is an `Err`, and the action
+  passes it on with `?`. Nothing is written.
+
+`close` returns a copy of the same wallet when it is already closed. Nothing changed, so there
+is no event. The action still stages it, so the row is written again at the next version, and
+the action still gets its row in the event table, with no event in it.
+
+The state enum is yours. The repository writes it to the `state` column as text, through methods
+you write (the examples call them `as_str` and `parse`).
+
+## What the macros write
+
+Rust has no base classes, so `#[model]` and `#[entity]` add what a model or entity needs:
+
+- a hidden field, `base`, holding the id, state, version and, for a model, the two dates and the
+  attached events;
+- a **getter for each of your fields**, with the field's own visibility: `wallet.balance()`
+  returns `&Decimal`. The fields themselves become private;
+- `Clone`, `Debug` and `PartialEq`. Two models are equal when their fields, id, state, version
+  and dates match; attached events don't count, so a wallet read back equals the one that was
+  written;
+- a builder, `WalletBuilder`, with a setter per field and `build()`;
+- the `Persistable` trait, and `Model` or `Entity`, which give `id()`, `version()`, `state()`,
+  `copy()`, and on a model `created_date()`, `updated_date()` and `events()`.
+
+The builder also has these, on top of one setter per field:
+
+| | model | entity |
+| --- | :-: | :-: |
+| `id(...)`, `state(...)` | yes | yes |
+| `version(...)`, `with_initial_version()`, `increase_version()` | yes | yes |
+| `copy_base(&existing)` | yes | yes |
+| `created_date(...)`, `updated_date(...)` | yes | no |
+| `with_event(...)`, `events(...)` | yes | no |
+
+`build()` checks that every field is set. A missing one is an `Error::Invalid` that names it
+(`balance cannot be null`). It also refuses a version below 1, cuts the dates to whole
+microseconds (what the databases keep), and sets `updated_date` to `created_date` when it is not
+given.
+
+Two things the builder does **not** do:
+
+- **`updated_date` is not moved for you.** `copy()` keeps the old value, and nothing in the
+  framework changes it on an update. If you want it to track changes, set it in your method.
+- **Events stay on the copy.** `copy()` keeps the events already attached, so
+  `wallet.deposit(a)?.deposit(b)?` carries two events. A wallet read from the database carries
+  none.
+
+`#[model_event(Wallet)]` makes a struct an event of `Wallet`. It derives `Clone`, `Debug` and
+serde's `Serialize` and `Deserialize`, with field names in camelCase.
+
+## `validate`: the model's own rules
+
+Field types cannot say everything, such as "a notification's recipient is never blank". Put such
+rules in a function and name it in the attribute:
+
+```rust
+#[entity(id = Id<Notification>, state = NotificationState, validate = Notification::validate)]
+pub struct Notification {
+    pub wallet_id: Uuid,
+    pub kind: String,
+    pub recipient: String,
+    pub message: String,
+}
+
+impl Notification {
+    fn validate(&self) -> Result<(), Error> {
+        if self.recipient.trim().is_empty() {
+            return Err(Error::Invalid("recipient cannot be blank".to_owned()));
+        }
+        if self.message.trim().is_empty() {
+            return Err(Error::Invalid("message cannot be blank".to_owned()));
+        }
+        Ok(())
+    }
+}
+```
+
+`build()` runs it last, every time: when an action makes a new one, when a method changes one,
+and when a repository reads a row back (a repository's `from_record` uses the builder too). So no
+path hands you a notification that breaks its rules.
+
+It is optional. A model with no rules beyond its types leaves it out, as the wallet does here.
+
+## Why immutable
+
+Every change goes through `copy()...build()`, and you cannot set a field in place. This does not
+compile:
+
+```rust
+wallet.balance = Decimal::TEN; // error: field `balance` of struct `Wallet` is private
+```
+
+So every change is one you can see: a method that builds a new value, runs the rules again, and
+attaches the event that says what happened. A change with no event would need a way around the
+builder, and there isn't one.
+
+One gap to know: Rust's privacy is per module, so code in the same module as the struct can still
+reach the fields. Keep that module's methods to `&self`, as the examples do.
+
+If you come from SeaORM's active models, what you give up is "change a field, then save". You say what changed by staging the new value on the plan.
+
+## Events
+
+```rust
+#[model_event(Wallet)]
+pub struct WalletMoneyDepositedEvent {
+    pub amount: Decimal,
+    pub new_balance: Decimal,
+}
+```
+
+The attribute names the model the event is about. The event struct holds only its own fields:
+the model's id and type come from the model it is attached to. Together they fill the event row's
+`model_id` and `model_type`.
+
+An event's type is its struct name: `WalletMoneyDepositedEvent`. Two event structs with the same
+name, in different modules, are refused when the second is written, because readers route on that
+name alone.
+
+### How an event is written
+
+An event is saved as JSON in the row's `payload`: first `modelId` and `modelName`, then the
+event's fields in the order you declared them. Field names are camelCase (`new_balance` becomes
+`newBalance`), a `Decimal` is a JSON number with its digits kept (`25.50`), a UUID is text, and an
+`Instant` is ISO-8601 text in UTC. This is the JSON Ekbatan for Java writes, byte for byte.
+
+On MySQL, the JSON column itself keeps numbers as doubles, so `10.00` is read back as `10.0`
+(for Java's rows too). PostgreSQL and MariaDB keep the digits.
+
+A few types do not match Java's JSON, so avoid them in events: `NaiveDateTime` (use `Instant`),
+`HashMap` (its order is random), and raw bytes.
+
+The local event handler reads the payload back into the same struct with serde, so nothing extra
+is needed. Consumers that read events from a broker read the JSON directly.
+
+## Optimistic locking, always
+
+Every update carries `WHERE version = ?`. If another transaction changed the row first, nothing
+matches, and `Error::StaleRecord` rolls back the whole action. By default the action then runs
+once more, from the start.
+
+The framework never takes row locks, so two deposits racing on one wallet do not wait for each
+other: one fails and runs again. When failing is the wrong outcome, take a
+[keyed lock](/reference/keyed-locks/) first, so the second caller waits and then succeeds. The
+REST examples do this for deposits.
+
+## Ids
+
+- **`ShardedId<Wallet>`** for a model whose rows may be spread over several databases. The shard
+  is packed into the UUID: `ShardedId::generate(shard)` makes one, and every later read is routed
+  by the id alone. See [Adding a shard](/learn/sharding/).
+- **`Id<Notification>`** otherwise: `Id::random()` makes one.
+
+The type parameter means the compiler keeps a wallet id and a notification id apart.
+
+## Soft deletion
+
+Nothing is removed. To delete, a model method moves the state to a deleted one and emits an
+event, like any other change. The repository's ready-made reads leave out rows whose `state` column
+says `DELETED`, so your state enum must write that exact text for its deleted state.
+
+```rust
+// An illustration: the examples' wallet has a Deleted state but no delete method.
+pub fn delete(&self) -> Result<Wallet, Error> {
+    if self.state() == WalletState::Deleted {
+        return Ok(self.clone());
+    }
+    self.copy()
+        .with_event(WalletDeletedEvent {})
+        .state(WalletState::Deleted)
+        .build()
+}
+```
+
+There is no `delete` on a repository: a row that silently vanished would leave every event already
+sent about it pointing at nothing. Two things follow. Deleting is a business decision, so the
+model says what it means; a wallet might refuse while it holds money. And a query you write
+yourself does not leave deleted rows out unless you say so.
+
+When a row truly has to go, such as for an erasure request, write that delete yourself, in SQL.
+
+## Naming
+
+Not enforced, but every example follows it, so a reader moving between services knows what they
+are looking at.
+
+- **Model**: a singular noun. `Wallet`, `Order`, `Subscription`.
+- **State enum**: `<Model>State`, written to the column in capitals: `WalletState::Opened` is
+  `OPENED`. `GenericState` (`Active` / `Deleted`) is ready-made for an entity, or a model with no
+  states of its own.
+- **Event**: `<Model><Verb>ed` + `Event`: `WalletCreatedEvent`, `WalletMoneyDepositedEvent`.
+  Past tense: an event says what already happened.
+- **Action**: `<Model><Verb>Action`: `WalletCreateAction`, `WalletDepositMoneyAction`.
+  Present tense: an action says what is asked for.
+
+## See also
+
+- [Actions](/learn/actions/): how a model goes from `perform` into the database
+- [Your first action](/learn/your-first-action/): the same wallet, end to end
+- [The outbox](/learn/outbox/): where a model's events end up
+- Reference: [Model](/reference/model/), [Entity](/reference/entity/),
+  [ModelEvent](/reference/model-event/), [Repository](/reference/repository/)

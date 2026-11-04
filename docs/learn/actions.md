@@ -1,0 +1,405 @@
+# Actions
+
+Build the new state first, then let the executor commit domain rows and event rows in one transaction. Retries, errors, and what an action may not do.
+
+An **action** is one unit of business work. It does **not** write to the database. It stages new
+and changed objects on its plan. Only after `perform` returns does the executor open one
+transaction, write every staged change, write the event rows, and commit.
+
+## Two steps
+
+```
+   executor.execute::<WalletDepositMoneyAction>(principal, params)
+                              │
+   ┌─── Step 1 - perform()   (no transaction yet) ──────────────┐
+   │   read from repositories                                   │
+   │   build new models                                         │
+   │   attach events to them                                    │
+   │   stage:  plan.add(notification) / plan.update(wallet)     │
+   │   return a result                                          │
+   └────────────────────────────────────────────────────────────┘
+                              │
+   ┌─── Step 2 - persist     (one transaction per shard) ───────┐
+   │   group staged changes by shard                            │
+   │   repositories write the business rows                     │
+   │   the event rows are written to eventlog.events            │
+   │   commit  -or-  roll back                                  │
+   │   on a stale record, run the whole action again            │
+   └────────────────────────────────────────────────────────────┘
+```
+
+Step 1 only builds values. Step 2 is the only place a transaction is opened, and it always wraps
+every staged change together with its event rows.
+
+Three things follow from the split, and they are most of why it exists.
+
+**`perform` does not write, so it cannot half-write.** It is handed a plan, not a transaction.
+If it returns an error, or panics, no transaction was ever opened, so there is nothing to roll
+back.
+
+**Running it again is cheap and correct.** When a version check fails, step 2 rolls back and the
+executor runs step 1 again from the top, with a **fresh plan**. It reads the row it lost the race
+on again, so the second try is built on the winner's state, not patched onto the loser's. An
+action that only reads, computes and stages is safe to run twice. One that called another service
+inside `perform` is not, which is the real reason to keep `perform` free of side effects.
+
+**Sharding stays out of the action.** Grouping by shard happens in step 2, so `perform` stages
+objects without knowing which database each lands on. The same action works on one database and
+on eight.
+
+The cost is one thing to keep in mind: **`plan.update(x)` has not written `x`.** It returns `x`
+as it *will* be written, at the next version, so later code in the same `perform` sees the new
+version. But the database has not seen it, and won't until `perform` returns.
+
+## Writing an action
+
+**Blocking**
+
+```rust
+use std::sync::Arc;
+
+use ekbatan::action::ActionPlan;
+use ekbatan::blocking::{Action, Repository};
+use ekbatan::{Error, ShardedId};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+use crate::model::Wallet;
+use crate::repository::WalletRepository;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Params {
+    pub wallet_id: ShardedId<Wallet>,
+    pub amount: Decimal,
+    pub recipient: Option<String>,
+}
+
+pub struct WalletDepositMoneyAction {
+    wallet_repository: Arc<WalletRepository>,
+}
+
+impl WalletDepositMoneyAction {
+    pub fn new(wallet_repository: Arc<WalletRepository>) -> Self {
+        WalletDepositMoneyAction { wallet_repository }
+    }
+}
+
+impl Action for WalletDepositMoneyAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = self.wallet_repository.get_by_id(&params.wallet_id)?;
+        let updated = wallet.deposit(params.amount)?;
+        plan.update(updated)
+    }
+}
+```
+
+**Async**
+
+```rust
+use std::sync::Arc;
+
+use ekbatan::action::ActionPlan;
+use ekbatan::aio::{AsyncAction, AsyncRepository};
+use ekbatan::{Error, ShardedId};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+use crate::model::Wallet;
+use crate::repository::WalletRepository;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Params {
+    pub wallet_id: ShardedId<Wallet>,
+    pub amount: Decimal,
+    pub recipient: Option<String>,
+}
+
+pub struct WalletDepositMoneyAction {
+    wallet_repository: Arc<WalletRepository>,
+}
+
+impl WalletDepositMoneyAction {
+    pub fn new(wallet_repository: Arc<WalletRepository>) -> Self {
+        WalletDepositMoneyAction { wallet_repository }
+    }
+}
+
+impl AsyncAction for WalletDepositMoneyAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    async fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = self.wallet_repository.get_by_id(&params.wallet_id).await?;
+        let updated = wallet.deposit(params.amount)?;
+        plan.update(updated)
+    }
+}
+```
+
+In async code the action implements `AsyncAction`, `perform` is `async fn`, and each read is
+awaited. What it stages is the same, and so is everything else on this page. A blocking `Action`
+is also an `AsyncAction`, so either kind registers in the same registry and runs in either
+executor.
+
+Typed parameters in, a model out. The action reads through a repository, gets a new wallet with
+an event already attached (that happened inside `wallet.deposit`), and stages it. **No database
+write happens in `perform`.**
+
+`Params` and `Result` are the action's input and output types. The compiler holds the call site
+to them: `execute::<WalletDepositMoneyAction>` takes these params and returns a `Wallet`.
+
+The params are written to the event row as JSON, so they must serialize to a JSON **object**: a
+struct. An action with no input uses an empty struct (`struct Params {}`); a bare value such as a
+number or `()` is refused when the action runs. `rename_all = "camelCase"` writes the keys the
+way Ekbatan for Java does.
+
+Nothing finds actions for you. You register each one when you build the executor:
+
+**Blocking**
+
+```rust
+let executor = ActionExecutor::builder()
+    .namespace("example.wallet")
+    .database_registry(registry.clone())
+    .action_registry(
+        ActionRegistry::builder()
+            .with_action(WalletCreateAction::new(Arc::new(SystemClock)))
+            .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+            .with_action(WalletCloseAction::new(wallets.clone()))
+            .build(),
+    )
+    .repository_registry(
+        RepositoryRegistry::builder()
+            .with_repository(wallets.clone())
+            .build(),
+    )
+    .build()?;
+```
+
+**Async**
+
+```rust
+let executor = AsyncActionExecutor::builder()
+    .namespace("example.wallet")
+    .database_registry(registry.clone())
+    .action_registry(
+        ActionRegistry::builder()
+            .with_action(WalletCreateAction::new(Arc::new(SystemClock)))
+            .with_action(WalletDepositMoneyAction::new(wallets.clone()))
+            .with_action(WalletCloseAction::new(wallets.clone()))
+            .build(),
+    )
+    .repository_registry(
+        RepositoryRegistry::builder()
+            .with_repository(wallets.clone())
+            .build(),
+    )
+    .build()?;
+```
+
+Running an action that was not registered is an error. So is staging a type that has no
+repository in the repository registry: the executor would have no way to write it.
+
+Calling it:
+
+**Blocking**
+
+```rust
+let wallet = executor.execute::<WalletDepositMoneyAction>(
+    Some("alice"),
+    wallet_deposit_money_action::Params {
+        wallet_id: id,
+        amount: Decimal::new(2550, 2),
+        recipient: None,
+    },
+)?;
+```
+
+**Async**
+
+```rust
+let wallet = executor
+    .execute::<WalletDepositMoneyAction>(
+        Some("alice"),
+        wallet_deposit_money_action::Params {
+            wallet_id: id,
+            amount: Decimal::new(2550, 2),
+            recipient: None,
+        },
+    )
+    .await?;
+```
+
+The executor opens one transaction, writes the wallet row at its next version, writes the
+`WalletMoneyDepositedEvent` row into `eventlog.events`, and commits. If anything fails, both roll
+back together.
+
+## The plan
+
+```rust
+plan.add(entity)?;          // staged for INSERT; returns it unchanged
+plan.update(entity)?;       // staged for UPDATE; returns it at its next version
+plan.add_all(items)?;
+plan.update_all(items)?;
+```
+
+Three rules:
+
+- **One id may be staged at most once per action.** Staging it again is an error. Two changes to
+  one row in one action are almost always a mistake you would rather find here. When you do mean
+  both, make them on the model first (`wallet.deposit(a)?.deposit(b)?`), then stage the result
+  once.
+- **`update` returns the object at its next version**, so later code in the same `perform` sees
+  the new version.
+- **The plan is a `&mut` parameter**, so only code holding it can stage. The compiler stops two
+  places staging at once.
+
+## One instance, many calls
+
+There is one instance of each action, shared by every call running at the same time. That is why
+`perform` takes `&self`, and why an action must be `Send + Sync`. Its only state is what its
+constructor was given: repositories, a clock. Everything that belongs to one call, its plan, its
+principal and its params, is passed to `perform`.
+
+Running work in parallel inside `perform` is allowed. Wait for every result, then stage. For
+reads, it is often simpler to do the parallel work **before** `execute`, in the caller.
+
+## Errors
+
+`perform` returns `Result<Self::Result, Error>`. An `Err` aborts the action: nothing it staged is
+written.
+
+- A broken rule in a model is usually `Error::Invalid`, as `deposit` returns for a negative
+  amount.
+- An error of your own goes in `Error::action(...)`: `Err(Error::action(InsufficientFunds))`.
+  The caller gets it back with `error.action_error::<InsufficientFunds>()`.
+- A row missing on `get_by_id` is `Error::NotFound`.
+
+## Retries on a stale record
+
+By default, an action that loses a race on a row (`Error::StaleRecord`) is run once more, after
+100 ms. That is enough for ordinary contention, and not enough to hide a real problem. To change
+it for one call:
+
+**Blocking**
+
+```rust
+let config = ExecutionConfiguration::builder()
+    .with_retry(RetryOn::stale_record(), RetryConfig::new(3, Duration::from_millis(50)));
+let wallet = executor.execute_with::<WalletDepositMoneyAction>(None, params, &config)?;
+```
+
+**Async**
+
+```rust
+let config = ExecutionConfiguration::builder()
+    .with_retry(RetryOn::stale_record(), RetryConfig::new(3, Duration::from_millis(50)));
+let wallet = executor
+    .execute_with::<WalletDepositMoneyAction>(None, params, &config)
+    .await?;
+```
+
+Or for every call, with `default_execution_configuration(...)` on the executor builder.
+
+Details worth knowing:
+
+- **`max_retries` counts retries, not tries.** `RetryConfig::new(1, ...)` runs the action at most
+  twice. `0`, or `.no_retry()`, turns retrying off.
+- **Your own errors can be retried too**: `RetryOn::error::<MyError>()` matches a `MyError`
+  inside `Error::action(...)`. It matches that exact type, found anywhere in the error's chain of
+  causes.
+- **`with_retry` replaces** an earlier policy for the same kind of error, the default one
+  included.
+- **A retry runs the whole action again from step 1, with a fresh plan.** Side effects outside
+  the plan, such as a log line, a counter or a call to another service, happen again too. Keep
+  `perform` free of them.
+
+## What an action may not do
+
+**Write directly.** A repository's `add` and `update` methods can be called from anywhere,
+`perform` included, and nothing stops you. But such a write runs outside the action's
+transaction, is not undone if the action fails, and writes no event. Inside an action, stage.
+
+**Run another action inside `perform`.** Actions do not nest. An action is one self-contained
+unit of work with one transaction, and nesting would blur that, hide the coupling, and make the
+flow hard to follow. Nothing in the framework prevents it (an action could hold an executor), but
+the inner action would commit on its own, before the outer one, and stay committed if the outer
+one failed.
+
+What you probably meant instead:
+
+- **They must happen together**: they belong in one action. One `perform` can read three
+  repositories and stage four objects.
+- **They are independent**: run them one after the other from the caller, which already knows
+  they are independent.
+- **One must follow the other**: run the second *after* the first has committed, from a handler
+  of the first one's event. A [saga](/learn/sagas/) is this shape, repeated: each committed action
+  emits an event, and the handler starts the next step in its own transaction.
+
+That works where nesting does not because after the commit there is no outer transaction left to
+break.
+
+**Call the blocking API from async code.** The blocking executor waits on its own runtime; from
+inside an async function it blocks that thread, and on a single-threaded runtime it panics. Use
+`ekbatan::aio` there. See [Blocking or async?](/learn/blocking-or-async/).
+
+## Actions over two shards
+
+Refused unless you ask. An action whose staged changes are on two shards fails with
+`Error::CrossShard`, naming two of them. The check runs on what was staged, between `perform` and
+the first transaction, so nothing has been written when it fires.
+
+**Blocking**
+
+```rust
+let config = ExecutionConfiguration::builder().allow_cross_shard(true);
+executor.execute_with::<TransferAction>(None, params, &config)?;
+```
+
+**Async**
+
+```rust
+let config = ExecutionConfiguration::builder().allow_cross_shard(true);
+executor
+    .execute_with::<TransferAction>(None, params, &config)
+    .await?;
+```
+
+With that, each shard gets its own transaction and commits on its own. **There is no two-phase
+commit**, and none can be turned on: the shards are separate databases. A failure rolls back only
+its own shard. The shards that already committed stay committed, and the executor logs that as an
+error.
+
+Be careful with retries here. If a later shard fails with a stale record, the default retry runs
+the whole action again, including the part that already committed on the earlier shards. Turn
+retries off for such a call (`.no_retry()`) unless `perform` stages nothing new when its work is
+already done.
+
+So a partial commit here is the [dual-write trap](/learn/the-dual-write-trap/) again: two systems
+that can disagree, both of them yours. Allow it per call, not as the executor's default, so the
+risk is visible where it is taken. If a partial commit would need undoing, the honest answer is a
+[saga](/learn/sagas/).
+
+## See also
+
+- [Your first action](/learn/your-first-action/): the same action end to end, with its event row
+  read back
+- [Models and entities](/learn/models-and-entities/): what `perform` reads and stages
+- [Sagas](/learn/sagas/): work that does not fit in one transaction
+- Reference: [Action](/reference/action/), [ActionPlan](/reference/action-plan/),
+  [ActionExecutor](/reference/action-executor/), [Testing](/reference/testing/)

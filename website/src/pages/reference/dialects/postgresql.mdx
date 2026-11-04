@@ -1,0 +1,101 @@
+---
+layout: ../../../layouts/DocLayout.astro
+title: PostgreSQL
+activeSection: reference
+lead: "Native UUID, JSONB, RETURNING, advisory locks, and TLS when the server offers it. Running the framework on PostgreSQL is the cleanest fit: every feature the framework wants, with no workaround."
+---
+
+## Quick reference
+
+| | |
+| --- | --- |
+| dialect | `Dialect::Postgres` |
+| driver | sqlx's PostgreSQL driver |
+| url | `postgres://host:5432/db`; in a config file `jdbc:postgresql://host:5432/db` |
+| login | `username` and `password`, never in the url |
+| uuid | `UUID`, native |
+| json | `JSONB` |
+| timestamps | `TIMESTAMP` (without time zone), holding UTC |
+| `RETURNING` | yes, on inserts and updates |
+| keyed lock | `SqlKeyedLockProvider`: `pg_advisory_lock` |
+| migration lock | an advisory lock, per database |
+| TLS | used when the server offers it (`sslmode=prefer`); `verify-full` checks the certificate |
+| tested against | `postgres:17-alpine`; TLS against `postgres:17` |
+
+## Migration order
+
+The framework's two event tables live in a schema of their own, `eventlog`, inside the database
+you connect to. The first migration creates the schema and then the tables in it:
+
+```
+migrations/
+  V0001__eventlog.sql           # CREATE SCHEMA IF NOT EXISTS eventlog; events + event_notifications + indexes
+  V0002__scheduled_tasks.sql    # only with distributed jobs or the local event handler
+  V0003__wallets.sql            # your own tables
+```
+
+No grant is needed: the connecting user can normally create a schema in its own database. That is
+why PostgreSQL is the least work of the three. Copy the framework's files from
+`wallet-example/migrations/postgres`; each table's DDL is on its page under
+[Framework tables](/reference/tables/).
+
+## Your own tables
+
+A table a repository's ready-made methods work on has `id`, `version` and `state` columns -
+[schemagen](/reference/schemagen/) writes the `Table` and `TableRecord` code only for such a
+table. A model's table also has `created_date` and `updated_date`.
+
+| column | type | role |
+| --- | --- | --- |
+| `id` | `UUID PRIMARY KEY` | read as `ekbatan::DbUuid` |
+| `version` | `BIGINT NOT NULL` | optimistic locking: updates carry `WHERE version = ?` and raise it |
+| `state` | `VARCHAR(24) NOT NULL` | `DELETED` marks a soft-deleted row; reads skip it |
+| `created_date` | `TIMESTAMP NOT NULL` | UTC, from the model |
+| `updated_date` | `TIMESTAMP NOT NULL` | UTC, from the model |
+
+## Things to know
+
+**`JSONB`, not `JSON`,** for the framework's JSON columns. The binary form compares by value and
+can be indexed; `JSON` is stored text.
+
+**A schema, not a database.** `eventlog` is a schema inside the connected database, so every
+database - every shard - has its own event tables, even when several shards share a server.
+Hand-written SQL names them `eventlog.events` and `eventlog.event_notifications`.
+
+**Plain `TIMESTAMP` for your columns, never `TIMESTAMPTZ`.** The framework writes UTC digits into
+zone-less columns and reads them back as UTC. Run the server in UTC (`TZ=UTC`, or
+`timezone = 'UTC'`) so `NOW()` and column defaults agree. See
+[Always UTC](/reference/multi-database/#always-utc).
+
+**Except in `scheduled_tasks`.** db-scheduler's layout has `timestamp with time zone` there, and
+the job registry reads those columns only in that type. Copy that file as it is.
+
+**Partial indexes suit this workload.** The examples index undelivered events with
+`WHERE delivered = FALSE` and due notifications with `WHERE state IN ('PENDING', 'FAILED')`: the
+index holds only the rows still waiting, and stays small however large the tables grow.
+
+**Many ids in one read** are sent as one array parameter: `id = ANY($1)`. So
+`find_all_by_ids` sends the same statement however many ids it is given.
+
+**`CREATE INDEX CONCURRENTLY`** refuses to run inside a transaction. Mark its migration file with
+`-- no-transaction` as its first line, and write it so it can run twice
+(`IF NOT EXISTS`): see [Migrations](/reference/migrations/#outside-a-transaction).
+
+**Advisory locks are per database.** A keyed lock on one shard's database does not block the same
+key on another's, even on one server. A pooler that changes connections between statements
+(PgBouncer in transaction mode) breaks session locks: point the lock pool and the migrator
+straight at the database.
+
+**TLS.** The image's own certificate is self-signed, so `verify-full` refuses it; give the CA in
+`sslrootcert`. The trusted CAs are Mozilla's list, built in; the operating system's store is not
+read. See [Connecting](/reference/connecting/#tls).
+
+**Driver settings** are sqlx's: `sslmode`, `sslrootcert`, `sslcert`, `sslkey`,
+`statement-cache-capacity`, `application_name`. A Java driver's `ApplicationName` is refused;
+write `application_name`.
+
+## See also
+
+- [Framework tables](/reference/tables/) - the DDL
+- [Multi-database](/reference/multi-database/) - where the three disagree
+- [`axum-wallet-rest-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-pg)

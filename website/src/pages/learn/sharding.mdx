@@ -1,0 +1,431 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Adding a shard
+activeSection: learn
+lead: Take a single-database service to two shards. Actions, queries and endpoints stay the same; the model's id carries its shard.
+---
+
+import LearnPager from "../../components/LearnPager.astro";
+import ModeTabs from "../../components/ModeTabs.astro";
+
+A **shard** is one of several databases that together hold one kind of row: some wallets live
+on one database, the rest on another. This page takes the wallet service from one database to
+two.
+
+The claim is narrow, and you can check it: **going from one database to two changes the model's
+id type, the repository's strategy, the one action that creates the row, and the config.
+Nothing else.** The other actions, the queries and the HTTP layer stay as they are.
+
+In the examples it is narrower still. The single-database
+[`axum-wallet-rest-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-pg)
+already has steps 1 to 3 below, running on one shard. Its two-database twin,
+[`axum-wallet-rest-sharded-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-sharded-pg),
+differs from it by its `ekbatan.json`, its `compose.yaml`, and one query its test uses. Not one
+action, endpoint or model changed.
+
+## 1. Change the model's id type
+
+```rust
+#[model(id = ShardedId<Wallet>, state = WalletState)]
+pub struct Wallet {
+    pub owner_id: Uuid,
+    pub currency: String,
+    pub balance: Decimal,
+}
+```
+
+`ShardedId<Wallet>` rather than `Id<Wallet>`. The shard is a `(group, member)` pair, and it is
+packed into 14 bits of the id itself, a version 7 UUID:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ high: [48-bit time in ms][4-bit version=7][12 random bits]     │
+│ low:  [2-bit variant][8-bit GROUP][6-bit MEMBER][48 random]    │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**The shard can be read from the id, with no lookup.** A request arrives with a wallet id;
+ekbatan reads the bits, finds the database, and opens the transaction there. No directory
+service, no sticky sessions.
+
+The layout is the same as in Ekbatan for Java, so a Java service reading one of these ids finds
+the same shard in it.
+
+## 2. Tell the repository
+
+```rust
+impl AbstractRepository for WalletRepository {
+    type Persistable = Wallet;
+    type Record = WalletsRecord;
+
+    fn registry(&self) -> &DatabaseRegistry {
+        &self.registry
+    }
+
+    fn sharding_strategy(&self) -> ShardingStrategy {
+        ShardingStrategy::EmbeddedBits
+    }
+
+    // from_record, to_record: unchanged
+}
+```
+
+One method. Without it the repository uses `ShardingStrategy::NoSharding`: every row on the
+default shard.
+
+## 3. Pick the shard at creation
+
+A row keeps its shard for its whole life, so the shard is chosen once, when the row is created.
+The model's constructor takes a `ShardIdentifier` and hands it to `ShardedId::generate`:
+
+```rust
+pub fn create_wallet(
+    shard: ShardIdentifier,
+    owner_id: Uuid,
+    currency: &str,
+    initial_balance: Decimal,
+    created_date: Instant,
+) -> WalletBuilder {
+    WalletBuilder::new()
+        .id(ShardedId::generate(shard)) // the shard bits live in the id from now on
+        .state(WalletState::Opened)
+        .owner_id(owner_id)
+        .currency(currency.to_owned())
+        .balance(initial_balance)
+        .created_date(created_date)
+        .with_initial_version()
+        .with_event(WalletCreatedEvent {
+            owner_id,
+            currency: currency.to_owned(),
+            initial_balance,
+        })
+}
+```
+
+Then the create action decides *which* shard, from what it knows about the wallet:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+pub const GLOBAL_SHARD: ShardIdentifier = ShardIdentifier::new(0, 0);
+pub const MEXICO_SHARD: ShardIdentifier = ShardIdentifier::new(1, 0);
+
+impl Action for WalletCreateAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = Wallet::create_wallet(
+            Self::resolve_shard(params.country_code.as_deref()),
+            params.owner_id,
+            &params.currency,
+            params.initial_balance,
+            self.clock.instant(),
+        )
+        .build()?;
+        plan.add(wallet)
+    }
+}
+```
+
+</div>
+<div slot="async">
+
+```rust
+pub const GLOBAL_SHARD: ShardIdentifier = ShardIdentifier::new(0, 0);
+pub const MEXICO_SHARD: ShardIdentifier = ShardIdentifier::new(1, 0);
+
+impl AsyncAction for WalletCreateAction {
+    type Params = Params;
+    type Result = Wallet;
+
+    async fn perform(
+        &self,
+        plan: &mut ActionPlan,
+        _principal: Option<&str>,
+        params: &Params,
+    ) -> Result<Wallet, Error> {
+        let wallet = Wallet::create_wallet(
+            Self::resolve_shard(params.country_code.as_deref()),
+            params.owner_id,
+            &params.currency,
+            params.initial_balance,
+            self.clock.instant(),
+        )
+        .build()?;
+        plan.add(wallet)
+    }
+}
+```
+
+</div>
+</ModeTabs>
+
+```rust
+fn resolve_shard(country_code: Option<&str>) -> ShardIdentifier {
+    match country_code {
+        Some(code) if code.eq_ignore_ascii_case("MX") => MEXICO_SHARD,
+        _ => GLOBAL_SHARD,
+    }
+}
+```
+
+**That `match` is the only code in the whole application that knows there is more than one
+database.** Every other action, every endpoint, and every test that does not check where a row
+was placed is unchanged.
+
+It is also final. A row cannot move to another shard, because moving it would change its id,
+and its id is how everything else refers to it. Choosing on the country means a customer who
+moves keeps their first shard. That is usually right: the reason for the shard was where the
+data was allowed to live when it was created. If it is not right for you, decide here, not in a
+migration later.
+
+## 4. Add the second database to the config
+
+A second group in `ekbatan.json`, with its own pools:
+
+```json
+"sharding": {
+  "defaultShard": { "group": 0, "member": 0 },
+  "groups": [
+    {
+      "group": 0,
+      "name": "global",
+      "members": [
+        {
+          "member": 0,
+          "name": "global",
+          "configs": {
+            "primaryConfig": {
+              "jdbcUrl": "${GLOBAL_DATABASE_URL:jdbc:postgresql://localhost:5432/wallet_global}",
+              "username": "${DATABASE_USER:wallet}",
+              "password": "${DATABASE_PASSWORD:wallet}",
+              "maximumPoolSize": 20
+            },
+            "jobsConfig": { "...": "as before" },
+            "lockConfig": { "...": "as before" }
+          }
+        }
+      ]
+    },
+    {
+      "group": 1,
+      "name": "mexico",
+      "members": [
+        {
+          "member": 0,
+          "name": "mexico",
+          "configs": {
+            "primaryConfig": {
+              "jdbcUrl": "${MEXICO_DATABASE_URL:jdbc:postgresql://localhost:5433/wallet_mexico}",
+              "username": "${DATABASE_USER:wallet}",
+              "password": "${DATABASE_PASSWORD:wallet}",
+              "maximumPoolSize": 20
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+(The `"...": "as before"` lines stand for the full settings; the real file is in the example.)
+
+That is the whole wiring change. `DatabaseRegistry::from_sharding_config` now builds a pool for
+each shard's `primaryConfig`. The job registry and the lock provider stay on the default shard's
+database, on its `jobsConfig` and `lockConfig`, as [Wiring a service](/learn/wiring-a-service/#three-pools-and-why)
+built them. The example's file also gives the Mexico member a `jobsConfig` and a `lockConfig`;
+its wiring never reads them.
+
+A group says *where data is allowed to live*: a country, say. A member says *which of the
+databases sharing that group's load* holds the row. See
+[Two axes](#two-axes-group-and-member) below.
+
+## 5. Start the second database, and migrate both
+
+Two databases, not two schemas in one: the point is separate capacity, and a second schema shares
+the first one's connections, disk and CPU. The example's `compose.yaml`:
+
+```yaml
+services:
+  postgres-global:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet_global
+      TZ: UTC
+    ports:
+      - "5432:5432"
+  postgres-mexico:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet_mexico
+      TZ: UTC
+    ports:
+      - "5433:5432"
+```
+
+The migration call does not change: `Migrator::builder().with_sharding_config(sharding)` now
+visits both databases, in config order, and stops at the first failure, naming the shards
+already done. Every shard gets the same schema, the event tables included: **each database
+keeps its own event log**, and an event is written to the database of the row it is about.
+
+On MySQL and MariaDB, give each shard a **server** of its own. The event tables live in a
+database called `eventlog`, and there is one per server, so two shards on one server would both
+try to own it.
+
+## 6. Run it
+
+```bash
+docker compose up -d
+cargo run -p axum-wallet-rest-sharded-pg
+
+curl -X POST http://localhost:8080/wallets \
+    -H 'Content-Type: application/json' \
+    -d '{"countryCode":"MX","ownerId":"00000000-0000-0000-0000-000000000001","currency":"MXN","initialBalance":"0.00"}'
+```
+
+The response says `"shardGroup": 1`. The row is only on the Mexico database, and so is its
+event:
+
+```bash
+psql -h localhost -p 5433 -U wallet wallet_mexico -c "SELECT count(*) FROM wallets"          # 1
+psql -h localhost -p 5432 -U wallet wallet_global -c "SELECT count(*) FROM wallets"          # 0
+psql -h localhost -p 5433 -U wallet wallet_mexico -c "SELECT count(*) FROM eventlog.events"  # 1
+```
+
+A deposit to that wallet, a read and a close all find the Mexico database from the id alone.
+The example's test checks each row landed only where its id says.
+
+## What changes for reads
+
+- **`get_by_id`, `find_by_id`, `exists_by_id`** read the shard from the id and ask one
+  database.
+- **`find_all`, `find_all_where`, `count_where`, `find_one_where`** have no id to read, so they
+  **ask every shard**, one after another, and add up the answers. On two shards you will not
+  notice; on many, it is the first thing you would feel.
+- **Your own queries** pick their databases themselves. `readonly_dbs()` gives every shard's
+  replica (or its primary, when it has no `secondaryConfig`), and `fetch_all` on it asks them
+  **all at the same time**:
+
+```rust
+// The example's wallets of one owner: the same select on every shard, run together.
+let records = self
+    .readonly_dbs()
+    .fetch_all::<WalletsRecord>(&select)
+    .await?;
+records.into_iter().map(Self::from_record).collect()
+```
+
+A repository with `NoSharding` never looks past the default shard, even in a sharded
+deployment. In the example, notifications are like that: they all live on the default shard,
+wherever their wallet is.
+
+## Cross-shard actions are refused
+
+Two wallets on two databases cannot change in one transaction. Nothing can do that: there is
+no atomic commit across databases to have.
+
+So an action whose staged changes land on more than one shard is refused, before anything is
+written, with `Error::CrossShard`.
+
+You have two honest answers. One is to allow it for one call, and accept that each shard
+commits on its own:
+
+<ModeTabs>
+<div slot="sync">
+
+```rust
+let config = ExecutionConfiguration::builder().allow_cross_shard(true).build();
+executor.execute_with::<TransferAction>(Some("alice"), params, &config)?;
+```
+
+</div>
+<div slot="async">
+
+```rust
+let config = ExecutionConfiguration::builder().allow_cross_shard(true).build();
+executor.execute_with::<TransferAction>(Some("alice"), params, &config).await?;
+```
+
+</div>
+</ModeTabs>
+
+The executor then opens **one transaction per shard**. A failure rolls back only its own
+shard; the ones that already committed stay committed. ekbatan logs that as an error naming
+them, and the trace's `ekbatan.action.persist` span carries
+`ekbatan.shard.partial_commit_failure`, `ekbatan.shard.committed_shards` and
+`ekbatan.shard.failed_shard`. That is the [dual-write trap](/learn/the-dual-write-trap/) again,
+with two of your own databases in place of a database and a broker.
+
+The other is a [saga](/learn/sagas/): one action per shard, chained by events, with a
+compensating action if a later step fails. Slower to write, and the only version that recovers
+from a partial failure without a person stepping in.
+
+Allow it **per call** rather than as the executor's default
+(`default_execution_configuration`), so the risk is visible where it is taken.
+
+## Two axes: group and member
+
+| axis | the question | what decides how many | range |
+| --- | --- | --- | --- |
+| **group** | where is this data *allowed* to live? | law, a tenant's contract, keeping business areas apart. **The world picks how many you have** | 8 bits: 0 to 255 |
+| **member** | how many writes per second can one database take? | capacity. You add members when one database cannot keep up | 6 bits: 0 to 63 per group |
+
+A new group - "a customer requires their data to stay in their country" - is a big event: a
+new region, new rules, something that can fail on its own. A new member is routine: the same
+region, more machines. Keeping them apart lets the create action route for the first with a
+plain rule and for the second however it spreads load.
+
+`ShardIdentifier::new(group, member)` is for constants: a member above 63 stops the build (the
+group is a `u8`, so it cannot pass 255). `ShardIdentifier::of(group, member)` is for numbers
+read at run time, and returns an error for a group above 255 or a member above 63.
+
+## What ekbatan offers, and what it does not
+
+- **`NoSharding`** (the default): every row on the default shard. Use it until a write-capacity
+  problem or a rule about where data lives forces you off it. Stay there as long as you can.
+- **`EmbeddedBits`**: the shard in the id's bits, chosen at creation, fixed for the row's life.
+  This covers most needs.
+- **No strategy of your own.** `ShardingStrategy` is a closed list of those two. Routing that
+  moves rows, hashes keys into shards after the fact, or looks the shard up somewhere is not
+  possible today.
+
+And what sharding never solves:
+
+- **transactions across shards** - no framework can give you those;
+- **searches by anything but the id** ask every shard;
+- **a hot shard** - if most traffic is one customer, that customer's shard is hot however many
+  others exist.
+
+If you are reaching for sharding to fix slow *reads*, it is probably the wrong tool: a replica
+(`secondaryConfig`), a cache or a precomputed read table answers that, and none of them costs
+you cross-shard transactions.
+
+## An id that names a shard you do not have
+
+A `ShardedId` can name a shard this deployment has no database for: an id from another
+environment, say, or from before a shard was removed. `unknownShardPolicy` in the `sharding`
+section decides what happens: `USE_DEFAULT_SHARD` (the default) looks on the default shard,
+and `FAIL` refuses with `Error::UnknownShard`.
+
+<LearnPager current="sharding" />
+
+## See also
+
+- [Sagas](/learn/sagas/) - the workflow that survives a partial commit
+- Reference: [Sharding](/reference/sharding/), [Multiple databases](/reference/multi-database/),
+  [Migrations](/reference/migrations/) - one call migrates every shard,
+  [Config files](/reference/config-files/)
+- [`axum-wallet-rest-sharded-pg`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-sharded-pg)
+  - two databases, running, with a test that checks where each row landed

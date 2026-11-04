@@ -1,0 +1,242 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Keyed locks
+activeSection: reference
+lead: "A lock named by a string, in-process or on the database, and how a lease behaves. A keyed lock lets one caller at a time run the work you wrap in it, for a key you choose, such as one wallet. A second caller waits, then goes ahead."
+---
+
+Every write already has optimistic locking: each row carries a version, and when two callers
+race, the loser's version check misses and it gets `Error::StaleRecord`. That is correct, but it
+is correct by *failing*. A keyed lock is pessimistic: it makes the second caller *wait and then
+succeed*, which is what anyone depositing into a busy wallet actually wants.
+
+## Optimistic or pessimistic
+
+| | |
+| --- | --- |
+| **optimistic** (the default, always on) | no lock, no waiting, no connection held. The loser fails and the action is retried. Right when conflicts are rare |
+| **pessimistic** (a keyed lock) | the second caller waits and succeeds. Right when conflicts are expected and failing is the wrong answer |
+
+The two work together. A keyed lock does not turn optimistic locking off: a write inside a lock
+still checks its version. That catches a writer that did not take the lock.
+
+## The contract
+
+`locks` below is a lock provider: one value you build at startup and share.
+[The providers](#the-providers) shows how.
+
+```rust
+use std::time::Duration;
+use ekbatan::aio::AsyncKeyedLockProvider;
+
+// waits as long as it takes
+let lease = locks.acquire("wallet:42", Duration::from_secs(10)).await?;
+// waits at most max_wait; None if the key stayed taken
+let maybe = locks.try_acquire("wallet:42", Duration::from_millis(500), Duration::from_secs(10)).await?;
+// ...
+lease.release().await;
+```
+
+In blocking code, the same calls without `.await`, from `ekbatan::blocking::KeyedLockProvider`:
+
+```rust
+use ekbatan::blocking::KeyedLockProvider;
+
+let lease = locks.acquire("wallet:42", Duration::from_secs(10))?;
+// ...
+lease.release();
+```
+
+Every provider serves both: `AsyncKeyedLockProvider` gives `AsyncLease`, `KeyedLockProvider`
+gives `Lease`. If a module imports both traits, say which one you mean:
+`AsyncKeyedLockProvider::acquire(&*locks, key, hold)`.
+
+The rules that come with it:
+
+- **A lease always ends.** The second argument, `max_hold`, is required. It is not a timeout on
+  your code: nothing interrupts the work. It is the promise that the lock is let go of even if
+  the holder hangs or forgets. When it passes, the lock is released and a warning is logged:
+  `Lock 'wallet:42' force-released: held longer than its max hold`. Set it above the worst case
+  for the work inside.
+- **Busy is not broken.** `try_acquire` returns `Ok(None)` when the key stays taken for all of
+  `max_wait`; a `max_wait` of zero is one try. `acquire` keeps waiting. A broken backend, an
+  unreachable database included, returns an error. Busy means "come back shortly"; broken means a
+  bug or an outage (`Error::Unexpected`, `lock 'wallet:42' could not be acquired: ...`).
+  Keeping them apart is what lets an HTTP handler answer "busy, retry" instead of a server error.
+- **The key is a string you choose**, and how much it covers is the whole design.
+  `wallet:{id}` makes callers take turns on one wallet. `wallets` makes them take turns on every
+  wallet, which is a different product.
+- **Release it, or drop it.** `release()` lets go. A lease that is dropped without it - an early
+  return, a `?`, a panic - is released too: an `AsyncLease` in the background, a blocking `Lease`
+  before the drop returns (or in the background, when it is dropped on an async runtime's
+  thread). Releasing twice is harmless.
+- **`is_held()`** says whether the lease still holds the lock: false after `release()`, or once
+  `max_hold` has passed.
+
+## Where to take the lock
+
+### At the caller, around `execute` - the default
+
+```
+├─ acquire lock         ←─┐
+├─ executor.execute()     │
+│   ├─ perform()          │ lock held
+│   │   ├─ read state     │
+│   │   └─ plan.update    │
+│   └─ commit             │
+└─ release lock         ←─┘
+```
+
+From the example's deposit endpoint:
+
+```rust
+let lease = state
+    .locks
+    .acquire(&format!("wallet:{id}"), DEPOSIT_LOCK_MAX_HOLD)
+    .await?;
+let deposited = state
+    .executor
+    .execute::<WalletDepositMoneyAction>(Some(PRINCIPAL), params)
+    .await;
+lease.release().await;
+Ok(Json(WalletResponse::from(&deposited?)))
+```
+
+The lease covers **both** `perform()` and the commit. The next caller cannot get in until the
+previous commit is visible, so there is no race and no version conflict between the writes the
+lock was meant to keep apart. **This is what most applications want.**
+
+And from the job worker, blocking, with the lease held until the closure returns:
+
+```rust
+let deposited = self
+    .locks
+    .acquire(&format!("wallet:{}", id.uuid()), Duration::from_secs(10))
+    .and_then(|_lease| {
+        // the lease is released when this closure returns
+        self.executor.execute::<WalletDepositMoneyAction>(Some("wallet-stipend-job"), params)
+    });
+```
+
+Set `max_hold` to an honest upper bound on `perform()` plus the commit. When it runs out the lock
+is released, even mid-commit, and the next caller gets the key while you are still writing.
+
+### Inside `perform()` - only for side effects
+
+`perform()` builds the plan; the executor opens the transaction after it returns, and commits it
+before `execute` returns. So a lock taken and let go inside `perform()` is let go **before** the
+commit. The next caller reads the old state, builds on a stale version, and its commit fails the
+version check. No data is lost, but calls fail and retry where a lock at the caller would have
+made them wait.
+
+Lock inside `perform()` only to keep **side effects** apart - one outgoing call per resource at a
+time, say - not the writes.
+
+## Not re-entrant
+
+**A task that takes a key it already holds waits for itself**, like any other caller, and with
+`acquire` that is a wait that never ends. Async code has no thread to tell one holder from
+another, so there is no "same holder" to let back in. Take each key once, at the outermost point.
+
+## The providers
+
+| provider | scope | how | notes |
+| --- | --- | --- | --- |
+| `InProcessKeyedLockProvider` | one process | a tokio mutex per key | callers of one key are served in the order they came. Keys nobody holds or waits for are forgotten |
+| `SqlKeyedLockProvider` on PostgreSQL | every process on the database | `pg_advisory_lock`, held by a session | one connection per lease |
+| `SqlKeyedLockProvider` on MySQL or MariaDB | every process on the server | `GET_LOCK` | one connection per lease. Lock names are server-wide |
+
+`PostgresKeyedLockProvider`, `MySqlKeyedLockProvider` and `MariaDbKeyedLockProvider` are other
+names for `SqlKeyedLockProvider`; it picks its SQL from the pool's dialect.
+
+```rust
+use ekbatan::keyed_lock::{InProcessKeyedLockProvider, SqlKeyedLockProvider};
+use ekbatan::ConnectionProvider;
+
+let in_process = InProcessKeyedLockProvider::new();
+let locks = SqlKeyedLockProvider::new(ConnectionProvider::from_config(&lock_config)?);
+```
+
+**The in-process provider stops nothing outside its process.** Run two instances of a service and
+callers from the other one walk straight in. Use it for a single process, or for tests; across
+instances, use the SQL provider.
+
+**There is no Redis provider.** The SQL provider's lock lives inside one database (on MySQL and
+MariaDB, one server), so services that share a lock must share that database.
+
+A provider is a plain value: build it, wrap it in an `Arc`, and hand it to whatever needs it.
+Nothing finds it for you.
+
+### The SQL provider holds a session
+
+On the database, the lock exists because a connection is open and holds it. So:
+
+- **A holder that dies frees the key.** When its process stops or its connection drops, the
+  database ends the session and the lock with it. Nobody has to step in.
+- **A clean release returns the connection** to the pool. If the release fails, or the session
+  was left in doubt, the connection is closed instead, so the database drops whatever it still
+  holds.
+- **A wait given up part-way closes its connection.** If an `acquire` future is dropped - a
+  timeout around it, a request cancelled - its connection is closed rather than returned. The
+  database might have granted the lock in that instant, and it must not be left behind on a
+  pooled connection. Tested on the three databases (`wallet-example/tests/keyed_locks.rs`).
+
+**What a held lock looks like on the server.** Each key is turned into a 64-bit number: the first
+8 bytes of its SHA-256 (`lock_key_hash(key)`). On PostgreSQL that number is the advisory lock's
+key. On MySQL and MariaDB the lock's name is that number in hex, with no prefix. That is what the
+server shows for a held lock. Ekbatan for Java turns keys into the same numbers.
+
+### Give the locks a pool of their own
+
+Each lease keeps a connection for as long as it is held. On the request pool, a lease taken
+during a request ties up one more request connection for that long. So build the provider on a
+pool of its own - the `lockConfig` in the examples' `ekbatan.json`:
+
+```rust
+let member = sharding.member(sharding.default_shard).expect("configured");
+let lock_pool = ConnectionProvider::from_config(
+    member.config_for("lockConfig").unwrap_or(member.primary_config()),
+)?;
+let locks = Arc::new(SqlKeyedLockProvider::new(lock_pool));
+```
+
+Size that pool by **how many leases are held at the same moment**, not by request rate. A
+hundred requests a second, each holding a lease for 20 ms, need two or three connections. Ten
+long imports, each holding one for a minute, need ten. When the pool is used up, the next caller
+waits for a connection, up to the pool's `connection_timeout`, before it even starts waiting for
+the key.
+
+### How the SQL provider waits
+
+It waits in **5-second segments**, not in one endless call, and asks again after each:
+
+- **PostgreSQL:** a bounded wait sets `lock_timeout` for the call and runs `pg_advisory_lock`;
+  a zero wait is one `pg_try_advisory_lock`.
+- **MySQL and MariaDB:** `GET_LOCK(name, seconds)`, with the wait given in seconds.
+
+Within a segment the waiter is queued inside the database, so it gets the lock the moment the
+holder lets go. Each new segment joins at the back, so a long waiter can lose its place to a newer
+one. The connection also sends traffic every five seconds, so network gear does not close a long
+wait as idle.
+
+**On MySQL and MariaDB, give `max_wait` in whole seconds.** `GET_LOCK` takes its wait in
+seconds, and MySQL rounds a fraction to a whole second, so a 300 ms wait may give up at once or
+after a second. The framework's test allows anything from 250 ms to 3 seconds for it.
+
+## Not the right tool at very high concurrency
+
+A keyed lock makes everyone who wants one key take turns, and the SQL one costs a connection per
+lease while it does. Both are fine for a busy wallet, a tenant-wide import, or a job that must not
+overlap itself. Neither scales to thousands of callers wanting the same key at once.
+
+Two signs tell you that you are past it: `try_acquire` returns `None` under normal traffic, not
+just during incidents; or the lock pool runs out. Then the answer is not a bigger pool. Split the
+key so callers spread out, batch the work so one holder does what many were queueing for, or go
+back to optimistic locking and let the version check turn the losers away.
+
+## See also
+
+- [Model](/reference/model/) - optimistic locking, which is always on
+- [Connecting](/reference/connecting/) - the lock pool's settings
+- [Distributed jobs](/reference/jobs/distributed-jobs/) - the job worker example takes a lock per
+  wallet

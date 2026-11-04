@@ -1,0 +1,231 @@
+---
+layout: ../../layouts/DocLayout.astro
+title: Migrations
+activeSection: reference
+lead: "Plain SQL files with Flyway names, run by the app: per shard, and without a transaction when asked. The schema gets into every database, every shard included, before anything opens a pool."
+---
+
+Migrations are **plain SQL files** with a version in their name, such as
+`V0003__wallets.sql`. They run in version order, on every database - every shard - when the
+application starts.
+
+They are run by sqlx's migrator, used as a library: the application migrates itself, with no
+separate tool to install. On top of it, the framework adds Flyway's file names, one target per
+shard, and a run that stops at the first failing shard and says which ones were already done.
+
+The files are named as Flyway names them, so migration files written for Ekbatan for Java copy
+over as they are. The history table is not Flyway's, though: see
+[What each database has applied](#what-each-database-has-applied).
+
+## One call, every shard
+
+```rust
+use ekbatan::migration::Migrator;
+
+Migrator::builder()
+    .with_sharding_config(&layout)
+    .locations([concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")])
+    .migrate()
+    .await?;
+```
+
+`layout` is your `ShardingConfig` - see [Sharding](/reference/sharding/#the-layout). Each
+shard's `primaryConfig` is migrated. Its replica follows it, and any other named config on the
+member is another pool onto the same database.
+
+`migrate()` is async only. From blocking code, run it with `block_on`:
+
+```rust
+ekbatan::blocking::block_on(Migrator::builder().with_sharding_config(&layout).migrate())?;
+```
+
+Shards go **one at a time, in the configured order**. The run stops at the first failure, and
+logs at `ERROR` which shard failed **and which were already migrated**:
+
+```
+Migrating mexico/mexico (1:0) failed
+Stopped at mexico/mexico (1:0); already migrated: ["global/global"]
+```
+
+The error itself is `Error::Migration { target, source }`, where `target` names the shard the
+same way. Half a migrated cluster is a state someone has to reason about, and the database's own
+error names only a connection.
+
+`migrate()` returns one `MigrationResult` per target: the `target`, the `initial_version` before
+(`None` for an empty database), the `target_version` after, and `migrations_executed`.
+
+### Targets
+
+| call | migrates |
+| --- | --- |
+| `.with_sharding_config(&layout)` | every shard's `primaryConfig`, named `<group name>/<member name>` (`member-<n>` when the member has no name) |
+| `.with_data_source(config)` | one database, as the default shard, named `default` |
+| `.with_target(Migrator::target(shard, config))` | one database, as that shard, named `shard-<group>-<member>` |
+| `.with_target(Migrator::named_target(shard, "name", config))` | the same, with your name |
+| `.with_targets(targets)` | several - for example `Migrator::targets(&layout)` filtered to some shards |
+| `Migrator::migrate(&config, ["migrations"])` | a shortcut: one database, one call |
+
+A builder with no target, or with no location, is refused.
+
+### Locations
+
+`.locations([...])` replaces the default location, the `migrations` folder in the current
+directory. A location is a folder path, read when `migrate()` runs, or files built into the
+binary with `embed_migrations!`:
+
+```rust
+use ekbatan::embed_migrations;
+
+Migrator::builder()
+    .with_sharding_config(&layout)
+    .locations([embed_migrations!("migrations")])
+    .migrate()
+    .await?;
+```
+
+`embed_migrations!("migrations")` reads the folder at **build time**, relative to the crate's
+`Cargo.toml`, and puts every `*.sql` and `*.sql.conf` file into the binary. So the service ships
+without a migrations folder beside it. A file added or changed is picked up on the next build.
+
+Several locations are applied together, in one version order: a version may appear in only one
+of them.
+
+## The files
+
+```
+migrations/
+  V0001__eventlog.sql
+  V0002__scheduled_tasks.sql
+  V0003__wallets.sql
+  V0004__notifications.sql
+  V0005__concurrent_index.sql
+  V0005__concurrent_index.sql.conf     (optional, see below)
+```
+
+- **`V<number>__<description>.sql`**. The version is a whole number; `V0003` and `V3` are the
+  same version. Files run in the order of their version **numbers**, so `V10` runs after `V2`.
+  The description is the part after `__`, with `_` read as a space.
+- **Only the folder itself is read**, not folders inside it. Files that do not end in `.sql` are
+  left alone, so a `README` beside them is fine.
+- **Several statements per file** are fine.
+
+Refused before any database is touched, with `Error::Config` naming the file:
+
+- a `.sql` file whose name is not `V<number>__<description>.sql` - skipping it would mean it
+  silently never runs. This includes `V1_1__x.sql` and `V1.1__x.sql`: the version must be one
+  whole number;
+- repeatable (`R__view.sql`) and undo (`U1__undo.sql`) migrations: not supported;
+- two files with the same version, in one location or across several.
+
+## Outside a transaction
+
+Each file runs in a transaction of its own, with its history row. A statement that refuses to run
+inside a transaction - PostgreSQL's `CREATE INDEX CONCURRENTLY` - needs the file marked, in one of
+two ways:
+
+```sql
+-- no-transaction
+CREATE INDEX CONCURRENTLY idx_wallets_currency ON wallets (currency);
+```
+
+The marker must be the **very first line**, starting at its first character. Or, Flyway's way, a
+file beside the migration named after it with `.conf` added, `V0005__concurrent_index.sql.conf`:
+
+```
+executeInTransaction=false
+```
+
+Both are tested on the three databases (`wallet-example/tests/migrations.rs`). On MySQL and
+MariaDB the difference is small: those databases commit each schema change on its own anyway,
+transaction or not.
+
+## What each database has applied
+
+Each database keeps a history in sqlx's table, **`_sqlx_migrations`**: one row per applied
+version, with its description, when it was applied, whether it succeeded, a checksum of the file,
+and how long it took.
+
+A database migrated by Ekbatan for Java's Flyway is **not** seen as migrated here, and the other
+way round: each tool has its own history table. Do not point both at one database.
+
+Before anything runs, the files are compared with the history:
+
+- **An applied file that was changed is refused** (`VersionMismatch`). The database was built by
+  a different version of the file. Even a comment counts as a change.
+- **An applied version whose file is gone is refused** (`VersionMissing`). That includes a
+  database migrated by a newer release of the service: an older release does not start against
+  it. Keep old files in place, and keep that in mind before rolling a release back.
+- A pending file is applied, in version order.
+
+## When a migration fails
+
+**On PostgreSQL** a failing file and its history row are rolled back together: nothing is left
+behind and nothing is recorded. Fix the file and start again.
+
+A PostgreSQL file marked to run outside a transaction is different. Its history row is written
+only after it has finished, so a failure half-way leaves what it already did, records nothing,
+and the next run starts the file again from the top. Write such a file so it is safe to run twice:
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
+
+**On MySQL and MariaDB** every schema change commits the moment it runs, and takes the
+not-yet-finished history row with it. So a file with a schema change in it that fails leaves
+behind whatever it had done, and its version is recorded as **failed**. The next run refuses to
+go on (`Dirty`) until someone has looked: put the database right by hand, delete the failed row
+from `_sqlx_migrations`, fix the file, and run again. So keep **one schema change per file** on
+those two databases. A file that only changes data is rolled back as a whole there too.
+
+## Several processes at once
+
+Several replicas starting together is safe. Each database is locked while it is migrated - an
+advisory lock on PostgreSQL, `GET_LOCK` on MySQL and MariaDB, both keyed by the database's name -
+so one process migrates and the others wait for it, then find nothing left to do. The wait has no
+time limit. A process that dies holding the lock does not leave it behind: the database drops it
+when the connection ends.
+
+Each target is migrated over **one connection**, made from its `DataSourceConfig` (the same URL,
+login, driver settings and TLS) and closed when it is done. Migrate over a direct connection to
+each shard's primary: a session lock does not survive a pooler that changes connections between
+statements, such as PgBouncer in transaction mode.
+
+## Writing the first migration
+
+The framework's tables have to exist, and you write their DDL yourself, in your first migration
+files. Copy them from the examples' migrations, one folder per database:
+`wallet-example/migrations/postgres`, `.../mysql`, `.../mariadb`. Each table's page has the DDL:
+[Framework tables](/reference/tables/).
+
+```
+migrations/
+  V0000__create_eventlog_database.sql   # MySQL and MariaDB only
+  V0001__eventlog.sql                   # eventlog.events and eventlog.event_notifications
+  V0002__scheduled_tasks.sql            # only with distributed jobs or the local event handler
+  V0003__wallets.sql                    # your own tables
+```
+
+Write column types from the [cheatsheet](/reference/multi-database/#column-type-cheatsheet):
+timestamps are `TIMESTAMP` on PostgreSQL and `DATETIME(6)` on MySQL and MariaDB, holding UTC.
+
+## Order at startup
+
+Migrate **before** anything uses a pool against a schema that may not be there yet:
+
+```rust
+Migrator::builder().with_sharding_config(sharding).locations([migrations]).migrate().await?;
+let registry = Arc::new(DatabaseRegistry::from_sharding_config(sharding)?);
+```
+
+Whether the service migrates itself at startup, or a deploy step does it first, is your call.
+The examples do it at startup, because that makes them runnable on their own.
+
+## Not supported
+
+Repeatable and undo migrations, versions with a dot or an underscore in them, placeholders
+(`${...}`) inside SQL, callbacks, migrating up to a chosen version, a baseline for a database
+built some other way, and migrations written in Rust.
+
+## See also
+
+- [schemagen](/reference/schemagen/) - runs these same migrations into a throwaway database and
+  reads the tables back
+- [Framework tables](/reference/tables/) - what has to exist
+- [Sharding](/reference/sharding/) - the layout this reads

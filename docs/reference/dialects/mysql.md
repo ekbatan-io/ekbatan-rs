@@ -1,0 +1,113 @@
+# MySQL
+
+CHAR(36) ids, no RETURNING, GET_LOCK, and why a password login needs TLS. MySQL is fully supported, with a few things to know: there is no uuid type, there are no partial indexes, the event tables are a database of their own, and a lock wait is counted in whole seconds.
+
+## Quick reference
+
+| | |
+| --- | --- |
+| dialect | `Dialect::MySql` |
+| driver | sqlx's MySQL driver |
+| url | `mysql://host:3306/db`; in a config file `jdbc:mysql://host:3306/db` |
+| login | `username` and `password`, never in the url |
+| uuid | `CHAR(36) CHARACTER SET ascii` |
+| json | `JSON` |
+| timestamps | `DATETIME(6)`, holding UTC |
+| `RETURNING` | **no** |
+| keyed lock | `SqlKeyedLockProvider`: `GET_LOCK`, server-wide names |
+| migration lock | `GET_LOCK`, named after the database |
+| TLS | used when the server offers it (`sslmode=preferred`); MySQL 8.4 offers it by default |
+| tested against | `mysql:8.4` |
+
+## Migration order
+
+The framework's two event tables go in a database of their own, `eventlog`, beside yours: on
+MySQL a schema *is* a database. The first migration creates it, the next puts the tables in it:
+
+```
+migrations/
+  V0000__create_eventlog_database.sql   # CREATE DATABASE IF NOT EXISTS eventlog;
+  V0001__eventlog.sql                   # eventlog.events + eventlog.event_notifications + indexes
+  V0002__scheduled_tasks.sql            # only with distributed jobs or the local event handler
+  V0003__wallets.sql                    # your own tables
+```
+
+The migrations run on your database's connection, so the login needs the right to create
+`eventlog` and to use it. The examples grant it from an `init.sql` that the container runs as root
+when it is first created:
+
+```sql
+GRANT ALL PRIVILEGES ON *.* TO 'wallet'@'%';
+FLUSH PRIVILEGES;
+```
+
+`GRANT ALL PRIVILEGES ON eventlog.* TO 'wallet'@'%';` is the narrower grant, for `eventlog`
+alone; it works before the database exists.
+
+**There is one `eventlog` per server**, shared by every database on it. Two shards, or two
+services, on one server write into the same two tables, and the fan-out job picks events by type
+alone, so each would get the other's events. Give each shard a server of its own.
+
+Copy the framework's files from `wallet-example/migrations/mysql`; each table's DDL is on its page
+under [Framework tables](/reference/tables/).
+
+## Your own tables
+
+| column | type | role |
+| --- | --- | --- |
+| `id` | `CHAR(36) CHARACTER SET ascii NOT NULL`, `PRIMARY KEY (id)` | read as `ekbatan::DbUuid` |
+| `version` | `BIGINT NOT NULL` | optimistic locking |
+| `state` | `VARCHAR(24) NOT NULL` | `DELETED` marks a soft-deleted row |
+| `created_date` | `DATETIME(6) NOT NULL` | UTC, from the model |
+| `updated_date` | `DATETIME(6) NOT NULL` | UTC, from the model |
+
+Name every uuid column `id` or `..._id`: [schemagen](/reference/schemagen/) reads a `CHAR(36)` as
+a uuid only there.
+
+## Things to know
+
+**No uuid type.** An id is the hyphenated text, `CHAR(36)`. Add `CHARACTER SET ascii`: under
+the default `utf8mb4` each character reserves four bytes, so the index is four times the size it
+needs to be. `BINARY(16)` is not supported: the framework writes uuids as text.
+
+**`DATETIME(6)`, never a bare `DATETIME`.** The bare form silently cuts times to whole seconds,
+and `event_date` is the outbox's only ordering key. (`scheduled_tasks` uses `TIMESTAMP(6)`, as
+db-scheduler has it.)
+
+**The session is in UTC.** sqlx sets each connection's `time_zone` to `+00:00`, and the job
+registry counts on it for `scheduled_tasks`' `TIMESTAMP` columns. Leave the `timezone` driver
+setting alone, and run the server with `TZ=UTC` so `NOW()` agrees too.
+
+**No `RETURNING`.** An insert cannot read its own row back in one statement, so `add` gives back
+the model as you gave it, and `update` the model's next version, rather than the row as stored.
+The `_no_result` forms skip even that.
+
+**No partial indexes.** Put the column you would filter on first in a composite index instead:
+`(delivered, event_type, event_date)` on `eventlog.events`, as the examples do.
+
+**Every schema change commits on its own**, the moment it runs, transaction or not. A migration
+that fails after one leaves it behind and is recorded as failed; the next run refuses to go on
+until you have put it right and removed the failed row from `_sqlx_migrations`. Keep **one schema
+change per migration file**. See [Migrations](/reference/migrations/#when-a-migration-fails).
+
+**A lock wait is counted in whole seconds.** `GET_LOCK` takes its wait in seconds, and MySQL
+rounds a fraction to a whole one, so a 300 ms `try_acquire` may give up at once or after a
+second. Give `max_wait` in whole seconds. Lock names are server-wide: two databases on one server
+share them.
+
+**A password's first login needs TLS.** MySQL 8.4's default login method,
+`caching_sha2_password`, sends a password over TLS or with an RSA key exchange, and this framework
+does only TLS. With TLS on - the default - a password login works. With `sslmode=disabled`, a
+password's **first** login is refused; once the server has cached it after a TLS login, a plain
+one gets in, until the server restarts or the password changes. Keep TLS on. Tested
+(`wallet-example/tests/tls.rs`).
+
+**Driver settings** are sqlx's: `sslmode`, `sslca`, `sslcert`, `sslkey`, `charset`, `collation`,
+`statement-cache-capacity`, `socket`, `timezone`. See
+[Connecting](/reference/connecting/#driver-settings).
+
+## See also
+
+- [MariaDB](/reference/dialects/mariadb/) - close, and different in ways that matter
+- [Framework tables](/reference/tables/) · [Multi-database](/reference/multi-database/)
+- [`axum-wallet-rest-mysql`](https://github.com/ekbatan-io/ekbatan-rs/tree/main/ekbatan-rs-examples/axum-wallet-rest-mysql)

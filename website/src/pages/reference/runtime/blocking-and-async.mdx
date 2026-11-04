@@ -1,0 +1,161 @@
+---
+layout: ../../../layouts/DocLayout.astro
+title: Blocking and async
+activeSection: reference
+lead: "Ekbatan has two APIs over one engine. ekbatan::aio is the async one, waited on with .await. ekbatan::blocking is the same framework for code that is not async: each call waits until it is done. Underneath, the blocking API runs the async code on a tokio runtime of its own."
+---
+
+import ModeTabs from "../../../components/ModeTabs.astro";
+
+On this site, code that differs between the two is shown with a **Blocking | Async** switch.
+Picking one flips every switch on every page.
+
+## The twins
+
+Each name in one API has a twin in the other. The blocking names are plain; the async ones start
+with `Async`.
+
+| `ekbatan::blocking` | `ekbatan::aio` | what it is |
+|---|---|---|
+| `Action` | `AsyncAction` | an action: `perform` is a `fn` / an `async fn` |
+| `ActionExecutor`, `ActionExecutorBuilder` | `AsyncActionExecutor`, `AsyncActionExecutorBuilder` | runs actions |
+| `Repository` | `AsyncRepository` | a repository's ready-made methods and selectors |
+| `Db`, `Dbs` | `AsyncDb`, `AsyncDbs` | where statements run: one shard, every shard |
+| `Transaction` | `AsyncTransaction` | a connection with a transaction open on it |
+| methods on `TransactionManager` | `AsyncTransactionManager` (`manager.as_async()`) | `begin`, `in_transaction` |
+| methods on `DatabaseRegistry` | `AsyncDatabaseRegistry` (`registry.as_async()`) | `primary`, `secondary`, `primaries`, `secondaries`, `close` |
+| `DistributedJob` | `AsyncDistributedJob` | a [background job](/reference/jobs/distributed-jobs/) |
+| `EventHandler` | `AsyncEventHandler` | a [local event handler](/reference/events/local-event-handler/) |
+| `KeyedLockProvider`, `Lease` | `AsyncKeyedLockProvider`, `AsyncLease` | a [keyed lock](/reference/keyed-locks/) |
+| `runtime()`, `block_on(...)` | - | the blocking API's runtime, below |
+
+Everything else is shared, and lives in its topic module or at the crate root: models,
+entities, events, `ActionPlan`, `ActionRegistry`, `RepositoryRegistry`, `ExecutionConfiguration`,
+`AbstractRepository`, `DatabaseRegistry`, `TransactionManager`, `ConnectionProvider`, the
+config types, `Error`.
+
+```rust
+use ekbatan::blocking::{Action, ActionExecutor, Repository};   // blocking code
+use ekbatan::aio::{AsyncAction, AsyncActionExecutor, AsyncRepository};   // async code
+```
+
+The word is `blocking`, as in `reqwest::blocking`, not `sync`, which in Rust means `std::sync`
+and the `Sync` marker.
+
+## One engine
+
+The async code does the work. The blocking API waits on it. So there is one copy of every rule:
+the same SQL, the same transaction, the same retries, the same spans.
+
+That goes for what you write too:
+
+- **Every blocking `Action` is also an `AsyncAction`.** The same goes for `DistributedJob` and
+  `EventHandler`. So a blocking one registers in the same registry and runs in the same executor
+  or job runner as an async one.
+- **Both executors run both kinds of action.** The blocking `ActionExecutor` is the async
+  executor, waited on.
+- **One repository serves both.** `Repository` and `AsyncRepository` are both implemented for
+  every `AbstractRepository`.
+- **Every `AsyncKeyedLockProvider` is also a `KeyedLockProvider`.**
+
+A service can mix them: blocking actions in an async service, or async actions run from a
+blocking `main`.
+
+## The runtime under the blocking API
+
+```rust
+// ekbatan::blocking
+pub fn runtime() -> &'static tokio::runtime::Runtime;
+pub fn block_on<F: Future>(future: F) -> F::Output;
+```
+
+`runtime()` is a multi-thread tokio runtime that belongs to the blocking API. Its threads are
+named `ekbatan-blocking`. It is made the first time something needs it, and lives until the
+process ends.
+
+`block_on(future)` runs an async call to the end, from code that is not async, and returns its
+result. Every blocking method is built on it. You use it yourself for the few calls that have no
+blocking twin:
+
+```rust
+use ekbatan::blocking::block_on;
+
+let applied = block_on(
+    Migrator::builder()
+        .with_sharding_config(&sharding)
+        .locations([concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")])
+        .migrate(),
+)?;
+```
+
+Calls with no blocking twin: migrations (`Migrator::migrate`), `JobRegistry::start` and `stop`,
+`ConnectionProvider::acquire` and `close`, the event log's `EventEntityRepository` and the
+notification repository's functions, and the event jobs' `drain_one_round`. None of them is on
+the path of a request.
+
+**Where pools live.** A pool built outside any tokio runtime - in a plain `main` - is put on the
+blocking API's runtime. A pool built inside your own runtime lives there.
+
+## Don't call the blocking API from async code
+
+The blocking API waits by blocking its thread. Called from inside an `async fn`:
+
+- on a **current-thread** runtime it **panics**. That includes plain `#[tokio::test]` and
+  `#[tokio::main(flavor = "current_thread")]`;
+- on a **multi-thread** runtime it blocks that worker thread while it waits, and the tasks
+  queued there wait too.
+
+This is the same rule as `reqwest::blocking`. It is documented, not checked.
+
+From async code, use `ekbatan::aio`. If you must call blocking code from an async function, move
+it off the runtime's threads first:
+
+```rust
+let registry = registry.clone();
+let result = tokio::task::spawn_blocking(move || {
+    registry.transaction_manager(GLOBAL)?.in_transaction(|_tx| Ok(()))
+})
+.await
+.expect("the blocking task panicked");
+```
+
+## Blocking code inside the async engine
+
+A blocking `Action`, `DistributedJob` or `EventHandler` runs inside the async engine. Its body
+runs through tokio's `block_in_place`, which first hands the worker thread's other tasks to
+another thread. So a blocking action, and the blocking calls it makes, don't stall other work.
+
+`block_in_place` needs tokio's **multi-thread** runtime. A blocking action run by the async
+executor on a current-thread runtime panics. In tests, use
+`#[tokio::test(flavor = "multi_thread")]`.
+
+The blocking `ActionExecutor`, called from a plain thread, has no such limit: it runs everything
+on the blocking API's own multi-thread runtime.
+
+## Both traits in one module
+
+`Repository` and `AsyncRepository` have methods with the same names. A module that imports both
+can't call `wallets.get_by_id(...)`: it matches both. Name the trait:
+
+```rust
+use ekbatan::aio::AsyncRepository;
+use ekbatan::blocking::Repository;
+
+let wallet = Repository::get_by_id(&*self.wallets, &params.wallet_id)?;
+```
+
+Usually, import only the one you use.
+
+## Which one to pick
+
+- **An async service** (axum, a tokio `main`): use `ekbatan::aio`, and `.await` everything.
+- **Code that is not async** (a CLI, a batch job, a service on plain threads): use
+  `ekbatan::blocking`. You need no runtime of your own.
+- **Mixed**: the async API in async code, the blocking API on plain threads or in
+  `spawn_blocking`.
+
+## See also
+
+- [Learn: Blocking or async](/learn/blocking-or-async/)
+- [Action](/reference/action/) · [ActionExecutor](/reference/action-executor/)
+- [Repository](/reference/repository/) · [TransactionManager](/reference/transaction-manager/)

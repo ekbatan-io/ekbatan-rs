@@ -1,0 +1,198 @@
+---
+layout: ../../../layouts/DocLayout.astro
+title: Observability
+activeSection: reference
+lead: "What the framework reports through OpenTelemetry - spans, their attributes, and metrics - and what it logs through tracing. It depends on the OpenTelemetry API only, not the SDK: with no SDK installed, every span and metric call does nothing. Install one to collect them."
+---
+
+## Installing an SDK
+
+The `ekbatan` crate depends on `opentelemetry` (the API) and nothing else for telemetry. To
+collect spans and metrics, add `opentelemetry_sdk` and an exporter to your app, and install the
+providers globally, once, at start-up:
+
+```rust
+use opentelemetry::global;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+
+let tracer_provider = SdkTracerProvider::builder()
+    .with_simple_exporter(span_exporter)      // the exporter of your choice
+    .build();
+global::set_tracer_provider(tracer_provider.clone());
+
+let meter_provider = SdkMeterProvider::builder()
+    .with_reader(PeriodicReader::builder(metric_exporter).build())
+    .build();
+global::set_meter_provider(meter_provider.clone());
+```
+
+The framework asks the global providers each time it starts a span or records a metric. So a
+provider installed after the executor and the jobs were built is still the one used.
+
+Spans are made with OpenTelemetry's API directly, not as `tracing` spans, so their names and
+attributes don't depend on a bridge.
+
+## Span tree
+
+Each `executor.execute(...)` gives:
+
+```
+ekbatan.action.execute               the whole call
++-- ekbatan.action.perform           your perform(), once per attempt
++-- ekbatan.action.persist           the writes, once per attempt
+    +-- ekbatan.transaction          one per shard
+        +-- ekbatan.repository       one per staged type and kind (insert, update)
+        +-- ekbatan.event.persist    the event rows
+```
+
+- A single-shard action gives one `ekbatan.transaction`. A cross-shard action gives one per shard,
+  each with its own `ekbatan.repository` and `ekbatan.event.persist` spans inside.
+- A **retried** action gives one `ekbatan.action.perform`, and one `ekbatan.action.persist` if it
+  got that far, **per attempt**, all under the one `ekbatan.action.execute`. There is no separate
+  span or event per retry; `ekbatan.action.retry.count` on the top span says how many there were.
+- An action whose `perform()` fails has no `ekbatan.action.persist` span.
+- An action that was never registered is refused before any span starts.
+
+Outside an action:
+
+- **`in_transaction`** (blocking or async) is one `ekbatan.transaction` span. A transaction opened
+  with `begin()` makes none.
+- **`add_all_no_result` and `update_all_no_result`**, called on a repository directly, are
+  `ekbatan.repository` spans. The other ready-made methods make none.
+
+## Attributes
+
+| attribute | type | span | meaning |
+| --- | --- | --- | --- |
+| `ekbatan.action.name` | string | action.execute, event.persist | the action's type name: `WalletDepositMoneyAction` |
+| `ekbatan.action.principal` | string | action.execute | the principal; empty when `None` |
+| `ekbatan.action.outcome` | string | action.execute | `success` or `error` |
+| `ekbatan.action.retry.count` | int | action.execute | the number of retries; 0 if none |
+| `ekbatan.shard.cross_shard` | bool | action.persist | present, and true, when the changes span shards |
+| `ekbatan.shard.group` | int | transaction | the shard's group |
+| `ekbatan.shard.member` | int | transaction | the shard's member |
+| `db.operation.name` | string | repository | `BATCH_INSERT` or `BATCH_UPDATE` |
+| `ekbatan.entity.type` | string | repository | the model or entity's type name: `Wallet` |
+| `ekbatan.batch.size` | int | repository | rows in the statement |
+| `ekbatan.event.count` | int | event.persist | events written on this shard |
+
+`db.operation.name` is OpenTelemetry's standard attribute name, with the framework's own values.
+Every other attribute starts with `ekbatan.`.
+
+`ekbatan.action.retry.count` is set once, when the call ends, with the final count.
+
+### On a partial cross-shard commit
+
+When a cross-shard action commits some shards and then fails on another, `ekbatan.action.persist`
+also gets:
+
+| attribute | meaning |
+| --- | --- |
+| `ekbatan.shard.partial_commit_failure` | `true`: this happened |
+| `ekbatan.shard.committed_shards` | the shards already committed, which won't roll back, as `group/member`: `[0/0]` |
+| `ekbatan.shard.failed_shard` | the shard that failed |
+
+The same facts are logged at ERROR, on a line starting `CRITICAL:`. They are set only when a
+shard's write or commit returns an error; see
+[ActionExecutor](/reference/action-executor/#cross-shard) for what that misses.
+
+### The instrumentation scope
+
+Spans are reported under the scope `io.ekbatan.core`, metrics under
+`io.ekbatan.events.localeventhandler`, both with the `ekbatan` crate's version.
+
+A service built on Ekbatan for Java reports the same span names, attribute names, metric names
+and scopes. One filter on `ekbatan.action.name`, one dashboard or one alert covers both services.
+
+## Errors
+
+A failing span gets status `ERROR`, with the error's text, and the error recorded as an
+`exception` event. An action that fails marks `ekbatan.action.execute` and the span where it
+failed (`ekbatan.action.perform`, or `ekbatan.action.persist` and the spans under it).
+
+## Context
+
+Each span is a child of OpenTelemetry's **current context** (`opentelemetry::Context::current()`)
+when it starts, and the framework makes its own spans current for the work they cover, across
+`.await`s. To put an action's spans under a span of yours, make yours current around the call:
+`.with_context(cx)` on the future (from `opentelemetry::context::FutureExt`), or `cx.attach()`
+in blocking code. With nothing current, `ekbatan.action.execute` starts a new trace.
+
+## Metrics
+
+Metrics come from the [local event handler](/reference/events/local-event-handler/) only.
+Actions are traced, not counted.
+
+| instrument | type | unit | attributes | from |
+| --- | --- | --- | --- | --- |
+| `ekbatan.events.fanned_out` | counter | `{event}` | - | fan-out job |
+| `ekbatan.events.notifications_created` | counter | `{notification}` | - | fan-out job |
+| `ekbatan.events.handled` | counter | `{notification}` | `outcome`, `handler` | handling job |
+| `ekbatan.events.handler.duration` | histogram | `s` | `handler`, `outcome` | handling job |
+| `ekbatan.events.delivery.lag` | histogram | `s` | `handler` | handling job |
+
+- **`fanned_out`** counts the events a fan-out round marked delivered, and
+  **`notifications_created`** the notification rows it made: one per event and handler that
+  subscribes to it. Both are added after the round commits.
+- **`handled`** counts the notification rows a handling round dealt with, by outcome and by
+  handler. It gives throughput and failure rate; `handler` tells one broken handler from a
+  general problem.
+- **`handler.duration`** is how long one call of one handler took, by the wall clock. It shows
+  a handler that is slow, as opposed to failing.
+- **`delivery.lag`** is the age of the event when its handler succeeded, by the job's clock. It is
+  recorded on success only.
+
+### `outcome` values
+
+| value | meaning |
+| --- | --- |
+| `succeeded` | the handler returned `Ok` |
+| `failed_retry` | it returned `Err`, or no handler has that name; a retry is scheduled, with backoff |
+| `expired_preflight` | the row was already past the retention window when claimed; the handler never ran |
+| `expired_postfailure` | it failed, and the next retry would land past the retention window |
+
+`handler.duration` has a narrower `outcome`: `succeeded` or `failed`. When a handler returns, the
+only thing known is whether it failed. Whether that becomes a retry or an expiry is decided after.
+
+### What to alert on
+
+- **`delivery.lag` rising steadily.** A shard falling behind still reports healthy success
+  counts, so no counter shows a growing backlog. This does.
+- **`handled` with `outcome="expired_postfailure"` above zero** means events were given up for
+  good. Each such batch is also logged at ERROR, starting `DISCARDED`.
+- **A steady stream of `failed_retry` on one `handler`** usually means that handler can't succeed
+  at all. An alert on it fires in minutes; the discard alert fires only once the retention window
+  has passed.
+
+## Logs
+
+The framework logs through the `tracing` crate. To see the lines, install a subscriber in your app,
+such as `tracing-subscriber`. Each line's target is the module it comes from, so a filter on
+`ekbatan` covers them all (`RUST_LOG=ekbatan=info` with tracing-subscriber's `EnvFilter`).
+
+| target | logs |
+| --- | --- |
+| `ekbatan::action::aio::executor` | each action: executing, completed (INFO), retrying, cross-shard (WARN), failed, rejected cross-shard, `CRITICAL:` partial commit (ERROR); shards and row counts (DEBUG). Both executors log here |
+| `ekbatan::migration` | each database migrated, and a failed migration |
+| `ekbatan::distributed_jobs::registry` | the job registry starting and stopping; each run (DEBUG); a failed run, a lost heartbeat, a revived dead run, a job abandoned at shutdown |
+| `ekbatan::local_event_handler::jobs` | a failed fan-out or handling round; a handler that failed or is missing (WARN); `DISCARDED` notifications (ERROR) |
+| `ekbatan::keyed_lock::aio` | a lock force-released because it was held past its max hold |
+
+The executor's lines read like Java's: `Executing WalletDepositMoneyAction [principal=alice]`,
+`WalletDepositMoneyAction completed in 12ms [principal=alice]`.
+
+sqlx, underneath, logs under its own `sqlx` targets.
+
+## Not instrumented
+
+- **Reads** make no spans: they run inside `perform()`, which already has one, and a span per
+  lookup would be noise. Add spans in your own repository methods if you need them.
+- **Single writes** (`add`, `update` and their `_no_result` forms) make no spans.
+- **Keyed locks and distributed jobs** make no spans or metrics; they log.
+
+## See also
+
+- [ActionExecutor](/reference/action-executor/) - the source of the action spans
+- [TransactionManager](/reference/transaction-manager/) - what `ekbatan.transaction` covers
+- [Local event handler](/reference/events/local-event-handler/) - what records the metrics
