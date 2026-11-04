@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn default_clock_returns_real_time() {
         let clock = VirtualClock::new();
-        let before = Utc::now();
+        let before = ekbatan::truncate_to_micros(Utc::now());
         let result = clock.instant();
         let after = Utc::now();
         assert!(before <= result && result <= after);
@@ -187,7 +187,7 @@ mod tests {
         let clock = VirtualClock::new();
         clock.pause_at(at("2000-01-01T00:00:00Z"));
         clock.resume();
-        let before = Utc::now();
+        let before = ekbatan::truncate_to_micros(Utc::now());
         let result = clock.instant();
         let after = Utc::now();
         assert!(before <= result && result <= after);

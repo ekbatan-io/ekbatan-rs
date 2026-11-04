@@ -17,13 +17,18 @@ pub trait Clock: Send + Sync {
     fn instant(&self) -> Instant;
 }
 
-/// The wall clock, in UTC: Java's `Clock.systemUTC()`. The default everywhere.
+/// The wall clock, in UTC, in whole microseconds: Java's `Clock.systemUTC()`. The default
+/// everywhere.
+///
+/// Microseconds because the databases keep no finer detail: a time with nanoseconds (Linux
+/// clocks have them, macOS's don't) would read back different from the one written, and
+/// differently per database, as PostgreSQL rounds the extra digits and the others drop them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn instant(&self) -> Instant {
-        Utc::now()
+        truncate_to_micros(Utc::now())
     }
 }
 
@@ -40,9 +45,10 @@ mod tests {
 
     #[test]
     fn the_system_clock_reads_now_in_utc() {
-        let before = Utc::now();
+        let before = truncate_to_micros(Utc::now());
         let read = SystemClock.instant();
         assert!(before <= read && read <= Utc::now());
+        assert_eq!(read.timestamp_subsec_nanos() % 1_000, 0, "whole microseconds");
     }
 
     #[test]
