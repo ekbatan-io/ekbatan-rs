@@ -13,6 +13,27 @@ pub enum UnknownShardPolicy {
     Fail,
 }
 
+impl std::str::FromStr for UnknownShardPolicy {
+    type Err = Error;
+
+    /// Java's `UnknownShardPolicy.from`: case, `_` and `-` ignored, so `USE_DEFAULT_SHARD`,
+    /// `useDefaultShard` and `use-default-shard` all read; blank is `UseDefaultShard`.
+    fn from_str(value: &str) -> Result<Self, Error> {
+        let normalised: String = value
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match normalised.as_str() {
+            "" | "usedefaultshard" => Ok(UnknownShardPolicy::UseDefaultShard),
+            "fail" => Ok(UnknownShardPolicy::Fail),
+            _ => Err(Error::Config(format!(
+                "unknownShardPolicy '{value}' is neither USE_DEFAULT_SHARD nor FAIL"
+            ))),
+        }
+    }
+}
+
 /// Every shard's `TransactionManager`, and with them every pool: Java's `DatabaseRegistry`.
 pub struct DatabaseRegistry {
     transaction_managers: BTreeMap<ShardIdentifier, TransactionManager>,
@@ -37,6 +58,11 @@ impl DatabaseRegistry {
             default_shard,
             unknown_shard_policy: UnknownShardPolicy::default(),
         })
+    }
+
+    /// Java's `DatabaseRegistry.Builder.databaseRegistry()`.
+    pub fn builder() -> DatabaseRegistryBuilder {
+        DatabaseRegistryBuilder::default()
     }
 
     /// Every shard of the config: a pool for its `primaryConfig`, and one for its
@@ -68,6 +94,16 @@ impl DatabaseRegistry {
     pub fn with_unknown_shard_policy(mut self, policy: UnknownShardPolicy) -> Self {
         self.unknown_shard_policy = policy;
         self
+    }
+
+    /// The default shard's `TransactionManager`: Java's `defaultTransactionManager()`.
+    pub fn default_transaction_manager(&self) -> &TransactionManager {
+        &self.transaction_managers[&self.default_shard]
+    }
+
+    /// Every shard's `TransactionManager`, in shard order: Java's `allTransactionManagers()`.
+    pub fn all_transaction_managers(&self) -> impl Iterator<Item = &TransactionManager> {
+        self.transaction_managers.values()
     }
 
     pub fn default_shard(&self) -> ShardIdentifier {
@@ -108,6 +144,67 @@ impl DatabaseRegistry {
     /// The async view: statements and `close()` waited on with `.await`.
     pub fn as_async(&self) -> AsyncDatabaseRegistry<'_> {
         AsyncDatabaseRegistry(self)
+    }
+}
+
+/// Java's `DatabaseRegistry.Builder`. The default shard is the one given with
+/// `with_default_database`, or the only one when just one is given.
+#[derive(Default)]
+pub struct DatabaseRegistryBuilder {
+    transaction_managers: Vec<TransactionManager>,
+    default_shard: Option<ShardIdentifier>,
+    unknown_shard_policy: UnknownShardPolicy,
+}
+
+impl DatabaseRegistryBuilder {
+    /// A shard that is not the default.
+    pub fn with_database(mut self, transaction_manager: TransactionManager) -> Self {
+        self.transaction_managers.push(transaction_manager);
+        self
+    }
+
+    /// The default shard: where the executor writes when an action stages nothing shard-aware.
+    pub fn with_default_database(mut self, transaction_manager: TransactionManager) -> Self {
+        self.default_shard = Some(transaction_manager.shard_identifier());
+        self.transaction_managers.push(transaction_manager);
+        self
+    }
+
+    /// Optional; `UseDefaultShard` unless set.
+    pub fn with_unknown_shard_policy(mut self, policy: UnknownShardPolicy) -> Self {
+        self.unknown_shard_policy = policy;
+        self
+    }
+
+    pub fn build(self) -> Result<DatabaseRegistry, Error> {
+        let default_shard = match (self.default_shard, self.transaction_managers.as_slice()) {
+            (Some(shard), _) => shard,
+            (None, [only]) => only.shard_identifier(),
+            (None, []) => {
+                return Err(Error::Config(
+                    "a DatabaseRegistry needs at least one database".to_owned(),
+                ));
+            }
+            (None, _) => {
+                return Err(Error::Config(
+                    "several databases and none is the default: use with_default_database"
+                        .to_owned(),
+                ));
+            }
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for manager in &self.transaction_managers {
+            if !seen.insert(manager.shard_identifier()) {
+                return Err(Error::Config(format!(
+                    "shard {} is registered twice",
+                    manager.shard_identifier()
+                )));
+            }
+        }
+        Ok(
+            DatabaseRegistry::new(default_shard, self.transaction_managers)?
+                .with_unknown_shard_policy(self.unknown_shard_policy),
+        )
     }
 }
 
@@ -159,5 +256,82 @@ mod tests {
         );
         assert!(registry.primary(UNCONFIGURED).is_err());
         assert_eq!(registry.effective_shard(MEXICO).unwrap(), MEXICO);
+    }
+
+    fn manager(shard: ShardIdentifier) -> TransactionManager {
+        let config = DataSourceConfig::new(Dialect::Postgres, "postgres://localhost:1/none", 1);
+        TransactionManager::new(
+            shard,
+            ConnectionProvider::from_config(&config).unwrap(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_builder_picks_the_default_as_javas_does() {
+        let registry = DatabaseRegistry::builder()
+            .with_database(manager(MEXICO))
+            .with_default_database(manager(GLOBAL))
+            .with_unknown_shard_policy(UnknownShardPolicy::Fail)
+            .build()
+            .unwrap();
+        assert_eq!(registry.default_shard(), GLOBAL);
+        assert_eq!(
+            registry.default_transaction_manager().shard_identifier(),
+            GLOBAL
+        );
+        let all: Vec<_> = registry
+            .all_transaction_managers()
+            .map(TransactionManager::shard_identifier)
+            .collect();
+        assert_eq!(all, [GLOBAL, MEXICO]);
+        assert!(matches!(
+            registry.effective_shard(UNCONFIGURED),
+            Err(Error::UnknownShard(_))
+        ));
+        let only = DatabaseRegistry::builder()
+            .with_database(manager(MEXICO))
+            .build()
+            .unwrap();
+        assert_eq!(only.default_shard(), MEXICO);
+        assert!(DatabaseRegistry::builder().build().is_err());
+        assert!(
+            DatabaseRegistry::builder()
+                .with_database(manager(GLOBAL))
+                .with_database(manager(MEXICO))
+                .build()
+                .is_err()
+        );
+        assert!(
+            DatabaseRegistry::builder()
+                .with_default_database(manager(GLOBAL))
+                .with_database(manager(GLOBAL))
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_policy_reads_as_javas_does() {
+        for text in [
+            "USE_DEFAULT_SHARD",
+            "useDefaultShard",
+            "use-default-shard",
+            " ",
+            "",
+        ] {
+            assert_eq!(
+                text.parse::<UnknownShardPolicy>().ok(),
+                Some(UnknownShardPolicy::UseDefaultShard),
+                "{text:?}"
+            );
+        }
+        for text in ["FAIL", "fail", "Fail"] {
+            assert_eq!(
+                text.parse::<UnknownShardPolicy>().ok(),
+                Some(UnknownShardPolicy::Fail)
+            );
+        }
+        assert!("panic".parse::<UnknownShardPolicy>().is_err());
     }
 }

@@ -14,6 +14,30 @@ pub struct ShardIdentifier {
 
 impl ShardIdentifier {
     pub const DEFAULT: ShardIdentifier = ShardIdentifier::new(0, 0);
+    pub const MIN_GROUP: u32 = 0;
+    pub const MAX_GROUP: u32 = 255;
+    pub const MIN_MEMBER: u32 = 0;
+    pub const MAX_MEMBER: u32 = 63;
+
+    /// From numbers read at run time (config, a request): Java's `ShardIdentifier.of`, which
+    /// refuses coordinates that don't fit the bits `ShardedId` keeps (group 0..255, member
+    /// 0..63).
+    pub fn of(group: u32, member: u32) -> Result<ShardIdentifier, crate::Error> {
+        if group > Self::MAX_GROUP {
+            return Err(crate::Error::Invalid(
+                "group must be 0 or 255 or between them".to_owned(),
+            ));
+        }
+        if member > Self::MAX_MEMBER {
+            return Err(crate::Error::Invalid(
+                "member must be 0 or 63 or between them".to_owned(),
+            ));
+        }
+        Ok(ShardIdentifier {
+            group: group as u8,
+            member: member as u8,
+        })
+    }
 
     /// For constants: a bad member stops the build.
     pub const fn new(group: u8, member: u8) -> ShardIdentifier {
@@ -62,6 +86,13 @@ impl<M> ShardedId<M> {
 
     pub fn uuid(&self) -> Uuid {
         self.value
+    }
+
+    /// When it was generated: the millisecond timestamp in its first 48 bits. Java's
+    /// `ShardedUUID.instant()`.
+    pub fn instant(&self) -> crate::Instant {
+        let millis = (self.value.as_u64_pair().0 >> 16) as i64;
+        chrono::DateTime::from_timestamp_millis(millis).expect("48 bits of millis fit")
     }
 
     pub fn shard(&self) -> ShardIdentifier {
@@ -215,5 +246,30 @@ mod tests {
             None
         );
         assert_eq!(mexico.resolve(ShardingStrategy::NoSharding), Some(mexico));
+    }
+
+    #[test]
+    fn coordinates_are_checked_as_javas_are() {
+        assert_eq!(
+            ShardIdentifier::of(255, 63).unwrap(),
+            ShardIdentifier::new(255, 63)
+        );
+        assert!(ShardIdentifier::of(256, 0).is_err());
+        assert!(ShardIdentifier::of(0, 64).is_err());
+    }
+
+    #[test]
+    fn a_sharded_id_knows_when_it_was_made() {
+        let before = chrono::Utc::now().timestamp_millis();
+        let id = ShardedId::<()>::generate(ShardIdentifier::new(3, 5));
+        let after = chrono::Utc::now().timestamp_millis();
+        let made = id.instant().timestamp_millis();
+        assert!(before <= made && made <= after, "{before} {made} {after}");
+        // Java's ShardedUUID.instant() on a fixed value: the high 48 bits are the millis.
+        let fixed = ShardedId::<()>::from_uuid(uuid::Uuid::from_u64_pair(
+            (1_700_000_000_123u64 << 16) | 0x7abc,
+            0x8000_0000_0000_0000,
+        ));
+        assert_eq!(fixed.instant().timestamp_millis(), 1_700_000_000_123);
     }
 }

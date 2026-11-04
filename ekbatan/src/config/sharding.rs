@@ -368,15 +368,11 @@ impl Reader<'_> {
             None => UnknownShardPolicy::UseDefaultShard,
             Some(policy) => {
                 let policy_path = format!("{path}.unknownShardPolicy");
-                match self.text(policy, &policy_path)?.as_str() {
-                    "USE_DEFAULT_SHARD" => UnknownShardPolicy::UseDefaultShard,
-                    "FAIL" => UnknownShardPolicy::Fail,
-                    _ => {
-                        return Err(Error::Config(format!(
-                            "{policy_path} must be USE_DEFAULT_SHARD or FAIL"
-                        )));
-                    }
-                }
+                self.text(policy, &policy_path)?
+                    .parse::<UnknownShardPolicy>()
+                    .map_err(|_| {
+                        Error::Config(format!("{policy_path} must be USE_DEFAULT_SHARD or FAIL"))
+                    })?
             }
         };
         let groups_path = format!("{path}.groups");

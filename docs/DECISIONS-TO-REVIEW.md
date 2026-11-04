@@ -242,3 +242,24 @@ Python's naming, then explicit folders for both sides: `blocking` and `aio`.
    nesting, error status, retries (from a blocking action), cross-shard, both
    `in_transaction`s, and all five metrics. Not tested: the partial-commit attributes (they need
    a shard to fail after another committed); they are set next to the existing alarm log.
+
+## Sharding: the last gaps to Java (2026-11-04)
+
+Sharding itself was built with items 2-3 and 7 (`ShardIdentifier`, `ShardedId` in Java's
+`ShardedUUID` bit layout, `NoSharding` / `EmbeddedBits`, `DatabaseRegistry` over many shards,
+`UnknownShardPolicy`, the cross-shard refusal, one transaction per shard, scatter-gather reads,
+`ShardingConfig`), tested on two shards on the three databases. A class-by-class check against
+Java's `io.ekbatan.core.shard` found these missing, now added:
+
+1. `ShardIdentifier::of(group, member)`, which refuses group > 255 or member > 63 at run time
+   (Java's `of`), and `MIN_GROUP` / `MAX_GROUP` / `MIN_MEMBER` / `MAX_MEMBER`.
+2. `ShardedId::instant()`: when the id was generated (Java's `ShardedUUID.instant()`).
+3. `DatabaseRegistry::builder()` (`with_database`, `with_default_database`,
+   `with_unknown_shard_policy`; the default is implicit with one database), plus
+   `default_transaction_manager()` and `all_transaction_managers()`.
+4. **Fix**: `unknownShardPolicy` in config now reads as Java's `UnknownShardPolicy.from` does:
+   case, `_` and `-` ignored, blank is `USE_DEFAULT_SHARD`. Before, only `USE_DEFAULT_SHARD` and
+   `FAIL` were accepted, so a config Java reads could fail here. (`FromStr` on
+   `UnknownShardPolicy`.)
+
+Not ported: Java's `ShardAwareId` interface (Rust's `ShardKey` trait plays its part).

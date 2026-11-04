@@ -20,6 +20,6 @@ pub(crate) mod blocking;
 pub use connection::{Connection, ConnectionProvider};
 pub(crate) use connection::{Pool, PooledConnection};
 pub use db::{Dialect, Record, Scalar};
-pub use registry::{DatabaseRegistry, UnknownShardPolicy};
+pub use registry::{DatabaseRegistry, DatabaseRegistryBuilder, UnknownShardPolicy};
 pub use transaction::TransactionManager;
 pub use uuid::DbUuid;

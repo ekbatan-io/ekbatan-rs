@@ -118,6 +118,20 @@ fn kebab_snake_and_camel_keys_are_one_key() {
     }}});
     let sharding = read(&tree).unwrap().sharding.unwrap();
     assert_eq!(sharding.unknown_shard_policy, UnknownShardPolicy::Fail);
+    // Java's UnknownShardPolicy.from: the value's case, '_' and '-' don't matter either.
+    for (written, policy) in [
+        ("fail", UnknownShardPolicy::Fail),
+        ("useDefaultShard", UnknownShardPolicy::UseDefaultShard),
+        ("use-default-shard", UnknownShardPolicy::UseDefaultShard),
+    ] {
+        let mut tree = tree.clone();
+        tree["ekbatan"]["sharding"]["unknown_shard_policy"] = json!(written);
+        let read_policy = read(&tree).unwrap().sharding.unwrap().unknown_shard_policy;
+        assert_eq!(read_policy, policy, "{written}");
+    }
+    let mut wrong = tree.clone();
+    wrong["ekbatan"]["sharding"]["unknown_shard_policy"] = json!("panic");
+    assert!(read(&wrong).is_err());
     let primary = sharding
         .member(ShardIdentifier::DEFAULT)
         .unwrap()
