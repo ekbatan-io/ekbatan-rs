@@ -11,6 +11,7 @@ members = [
     "ekbatan-rs-examples/axum-wallet-rest-mysql",
     "ekbatan-rs-examples/axum-wallet-rest-mariadb",
     "ekbatan-rs-examples/axum-wallet-rest-sharded-pg",
+    "ekbatan-rs-examples/axum-wallet-saga-pg",
 ]
 # The examples are members (one lock file, so the 2-week pins hold for them too) but not
 # default members: `cargo build` / `cargo test` at the root are the framework's. Build an
