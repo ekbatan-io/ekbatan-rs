@@ -1,0 +1,48 @@
+# Checks the dependencies every Monday, and on each push to main that changes them.
+#
+# Writes a report - known vulnerabilities (from osv.dev, for every crate in Cargo.lock) and newer
+# releases that are 2 weeks old (the project's rule), plus the Rust toolchain - to the run's
+# summary and to one open issue titled "Dependency report", kept up to date: a comment flags each
+# newly found vulnerability, and the issue is closed when nothing is left to report. The scripts
+# are in .github/dependency-check/.
+name: Dependency check
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/dependency-check/**"
+      - ".github/workflows/dependency-check.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: dependency-check
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write # keep the report issue up to date
+
+jobs:
+  check:
+    name: Check dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # The runner's own Python is enough: the scripts use the standard library only.
+      - name: Write the report
+        run: |
+          python3 .github/dependency-check/report.py --out "$RUNNER_TEMP/report.md" \
+            --state "$RUNNER_TEMP/state.json"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Update the report issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/dependency-check/issue.py "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/state.json"
