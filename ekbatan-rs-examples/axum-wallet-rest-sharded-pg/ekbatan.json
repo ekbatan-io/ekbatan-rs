@@ -1,0 +1,84 @@
+{
+  "ekbatan": {
+    "namespace": "example.wallet",
+    "sharding": {
+      "defaultShard": {
+        "group": 0,
+        "member": 0
+      },
+      "groups": [
+        {
+          "group": 0,
+          "name": "global",
+          "members": [
+            {
+              "member": 0,
+              "name": "global",
+              "configs": {
+                "primaryConfig": {
+                  "jdbcUrl": "${GLOBAL_DATABASE_URL:jdbc:postgresql://localhost:5432/wallet_global}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "dataSourceProperties": {
+                    "application_name": "wallet-service"
+                  },
+                  "maximumPoolSize": 20
+                },
+                "jobsConfig": {
+                  "jdbcUrl": "${GLOBAL_DATABASE_URL:jdbc:postgresql://localhost:5432/wallet_global}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 5
+                },
+                "lockConfig": {
+                  "jdbcUrl": "${GLOBAL_DATABASE_URL:jdbc:postgresql://localhost:5432/wallet_global}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 30
+                }
+              }
+            }
+          ]
+        },
+        {
+          "group": 1,
+          "name": "mexico",
+          "members": [
+            {
+              "member": 0,
+              "name": "mexico",
+              "configs": {
+                "primaryConfig": {
+                  "jdbcUrl": "${MEXICO_DATABASE_URL:jdbc:postgresql://localhost:5433/wallet_mexico}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "dataSourceProperties": {
+                    "application_name": "wallet-service"
+                  },
+                  "maximumPoolSize": 20
+                },
+                "jobsConfig": {
+                  "jdbcUrl": "${MEXICO_DATABASE_URL:jdbc:postgresql://localhost:5433/wallet_mexico}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 5
+                },
+                "lockConfig": {
+                  "jdbcUrl": "${MEXICO_DATABASE_URL:jdbc:postgresql://localhost:5433/wallet_mexico}",
+                  "username": "${DATABASE_USER:wallet}",
+                  "password": "${DATABASE_PASSWORD:wallet}",
+                  "maximumPoolSize": 30
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "local-event-handler": {
+      "handling": {
+        "enabled": true
+      }
+    }
+  }
+}

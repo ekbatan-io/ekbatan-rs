@@ -257,6 +257,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-wallet-rest-sharded-pg"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "ekbatan",
+ "ekbatan-schemagen",
+ "http-body-util",
+ "rust_decimal",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

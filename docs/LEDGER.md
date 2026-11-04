@@ -103,7 +103,7 @@ Web framework: axum. Each example: README, migrations, `ekbatan.json`, schema ge
 |---|---|---|
 | 11a | `axum-wallet-rest-pg`: REST service (async), keyed lock on deposit, event handler -> notification | done (EKB-0022) |
 | 11b | `axum-wallet-rest-mysql`, `axum-wallet-rest-mariadb`: the same, per database, written by `sync-examples.py` | done (EKB-0022) |
-| 11c | `axum-wallet-rest-sharded-pg`: two databases, id routing, cross-shard transfer refused (422) | |
+| 11c | `axum-wallet-rest-sharded-pg`: two PostgreSQL servers, `MX` wallets on the Mexico shard, routing by id (Java's example; neither Java's nor Python's has a transfer endpoint) | done (EKB-0023) |
 | 11d | `axum-wallet-saga-pg`: transfer as three event-chained steps, compensation, 202 | |
 | 11e | `job-worker-pg`: no HTTP, blocking jobs once per slot, clean shutdown | |
 | 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | |

@@ -1,0 +1,22 @@
+# The two databases `cargo run` talks to, one server per shard, with the logins and databases
+# `ekbatan.json` defaults to. `docker compose up -d` starts them; `docker compose down` removes
+# them.
+services:
+  postgres-global:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet_global
+      TZ: UTC
+    ports:
+      - "5432:5432"
+  postgres-mexico:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet_mexico
+      TZ: UTC
+    ports:
+      - "5433:5432"
