@@ -35,7 +35,12 @@ async fn create_stages_one_wallet_and_its_event() {
         .assert_added_one::<Wallet>(|wallet| {
             assert_eq!(wallet.id().shard(), MEXICO_SHARD);
             assert_eq!(wallet.state(), WalletState::Opened);
-            assert_eq!(wallet.created_date(), ekbatan::Clock::instant(&*clock));
+            // The model keeps whole microseconds, as the databases do (Linux clocks give
+            // nanoseconds).
+            assert_eq!(
+                wallet.created_date(),
+                ekbatan::truncate_to_micros(ekbatan::Clock::instant(&*clock))
+            );
         })
         .assert_total_additions(1)
         .assert_no_updates()
