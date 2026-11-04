@@ -1,5 +1,6 @@
 //! Serves the wallet API on `PORT` (8080), configured by the file `EKBATAN_CONFIG` names
-//! (`ekbatan.json`). Ctrl-C stops it: requests in flight finish, jobs stop, pools close.
+//! (`ekbatan.json`). Ctrl-C or SIGTERM (what Docker and Kubernetes send) stops it: requests
+//! in flight finish, jobs stop, pools close.
 
 use axum_wallet_rest_pg::app::App;
 use ekbatan::EkbatanConfig;
@@ -22,11 +23,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     println!("wallet API on http://localhost:{port}/wallets");
     axum::serve(listener, app.router.clone())
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(stop_signal())
         .await?;
 
     app.stop().await;
     Ok(())
+}
+
+/// Ctrl-C (SIGINT) or SIGTERM, whichever comes first.
+async fn stop_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("a SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
 }
