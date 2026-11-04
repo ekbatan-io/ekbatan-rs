@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "website/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "website/**"
+  workflow_dispatch:
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain comes from rust-toolchain.toml (rustup on the runner installs it on first use).
+
+jobs:
+  lint:
+    name: format, clippy, examples in step
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2.9.3
+        with: { shared-key: workspace }
+      - run: cargo fmt --all --check
+      # Every crate, examples included. Building one runs its build.rs, which generates the
+      # schema from a throwaway database in Docker (the runner has Docker).
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The MySQL and MariaDB examples are written from the PostgreSQL one.
+      - run: python3 ekbatan-rs-examples/sync-examples.py --check
+
+  tests:
+    # The framework's own tests: each one that touches the database runs on PostgreSQL, MySQL
+    # and MariaDB, in Docker.
+    name: tests (PostgreSQL, MySQL, MariaDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2.9.3
+        with: { shared-key: workspace }
+      - run: cargo test
+
+  examples:
+    name: example ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - wallet-service-blocking-pg
+          - axum-wallet-rest-pg
+          - axum-wallet-rest-mysql
+          - axum-wallet-rest-mariadb
+          - axum-wallet-rest-sharded-pg
+          - axum-wallet-saga-pg
+          - job-worker-pg
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2.9.3
+        with: { shared-key: examples }
+      - run: cargo test -p ${{ matrix.example }}
