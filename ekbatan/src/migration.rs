@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use sqlx::migrate::{Migrate, Migration, MigrationType, Migrator as SqlxMigrator};
 use tracing::{error, info};
 
-use crate::connection::Pool;
+use crate::persistence::Pool;
 use crate::{ConnectionProvider, DataSourceConfig, Error, ShardIdentifier};
 
 /// Where `migrate` reads files when no location is given: Java's `classpath:db/migration`.

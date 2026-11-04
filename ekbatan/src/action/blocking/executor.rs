@@ -3,9 +3,10 @@
 
 use std::sync::Arc;
 
-use crate::action::{ActionRegistry, EventPersister, ExecutionConfiguration, RepositoryRegistry};
+use crate::action::{ActionRegistry, EventPersister, ExecutionConfiguration};
 use crate::aio::{AsyncAction, AsyncActionExecutor, AsyncActionExecutorBuilder};
 use crate::blocking::block_on;
+use crate::repository::RepositoryRegistry;
 use crate::{Clock, DatabaseRegistry, Error};
 
 /// Runs actions: Java's `ActionExecutor`, the framework's entry point. It is the

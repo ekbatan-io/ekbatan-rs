@@ -10,8 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ekbatan::action::{
-    ActionPlan, ActionRegistry, EventEntityRepository, ExecutionConfiguration, RepositoryRegistry,
-    RetryConfig, RetryOn,
+    ActionPlan, ActionRegistry, EventEntityRepository, ExecutionConfiguration, RetryConfig, RetryOn,
 };
 use ekbatan::blocking::{
     self, Action, ActionExecutor, DistributedJob, EventHandler, KeyedLockProvider, Repository,
@@ -22,6 +21,7 @@ use ekbatan::keyed_lock::SqlKeyedLockProvider;
 use ekbatan::local_event_handler::{
     EventEnvelope, EventFanoutJob, EventHandlerRegistry, EventHandlingJob,
 };
+use ekbatan::repository::RepositoryRegistry;
 use ekbatan::{
     Clock, ConnectionProvider, DatabaseRegistry, Dialect, Error, Model, Persistable, ShardedId,
     SystemClock,

@@ -1,8 +1,8 @@
 //! `Transaction`, and `TransactionManager`'s `begin` / `in_transaction`. `aio::AsyncTransaction`
 //! is the async twin.
 
-use super::{Db, block_on, runtime};
 use crate::aio::AsyncTransaction;
+use crate::blocking::{Db, block_on, runtime};
 use crate::{Error, ShardIdentifier, TransactionManager};
 
 impl TransactionManager {

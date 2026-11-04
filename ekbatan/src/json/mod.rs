@@ -12,6 +12,8 @@
 //!
 //! Proven against values Jackson wrote (`tests/fixtures`).
 
+mod ids;
+
 use std::io;
 
 use serde::Serialize;

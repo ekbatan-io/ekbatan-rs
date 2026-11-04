@@ -8,10 +8,10 @@ use sea_query::extension::postgres::PgFunc;
 use sea_query::{ArrayType, Condition, Expr, ExprTrait, Iden, Value};
 use uuid::Uuid;
 
-use crate::repository::{
-    IdOf, TableOf, count_from, insert_of, not_deleted, select_from, select_one_from,
-    update_all_sql, update_of,
+use crate::repository::sql::{
+    count_from, insert_of, not_deleted, select_from, select_one_from, update_all_sql, update_of,
 };
+use crate::repository::{IdOf, TableOf};
 use crate::{
     AbstractRepository, AsyncDb, AsyncDbs, AsyncTransaction, Dialect, Error, ModelId, Persistable,
     ShardIdentifier, ShardKey, ShardingStrategy, Table,

@@ -10,9 +10,9 @@ use uuid::Uuid;
 use crate::action::config::ExecutionConfiguration;
 use crate::action::event_persister::{EmittedEvent, EventPersister, SingleTableJsonEventPersister};
 use crate::action::plan::{ActionPlan, AnyChanges};
-use crate::action::repository_registry::RepositoryRegistry;
 use crate::action::{ActionRegistry, action_name};
 use crate::aio::AsyncAction;
+use crate::repository::RepositoryRegistry;
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 type ShardChanges = Vec<(TypeId, Box<dyn AnyChanges>)>;

@@ -1,7 +1,6 @@
-//! The blocking (sync) API: the plain names, for code that is not async (Rust's
-//! `reqwest::blocking` pattern; Python's sync API). The async twins are `ekbatan::aio::Async*`.
-//! What both sides share (plans, registries, `AbstractRepository`, config, lock providers, the
-//! job scheduler) is in the topic modules.
+//! The blocking API: everything an app that is not async uses, under plain names (Rust's
+//! `reqwest::blocking`; Python's sync API). Each lives with its topic (`action`, `repository`,
+//! `persistence`, ...) next to its async twin in `ekbatan::aio`; this module gathers them.
 //!
 //! The async code is the engine and this API waits on it, so every rule has one copy: an
 //! `Action`, `DistributedJob` or `EventHandler` is also an `AsyncAction`, `AsyncDistributedJob`
@@ -14,24 +13,12 @@
 //! itself async: called from an async function it blocks that function's thread, and on a
 //! single-threaded runtime it panics, as `reqwest::blocking` does.
 
-mod action;
-mod db;
-mod distributed_job;
-mod event_handler;
-mod executor;
-mod keyed_lock;
-mod registry;
-mod repository;
-mod transaction;
-
-pub use action::Action;
-pub use db::{Db, Dbs};
-pub use distributed_job::DistributedJob;
-pub use event_handler::EventHandler;
-pub use executor::{ActionExecutor, ActionExecutorBuilder};
-pub use keyed_lock::{KeyedLockProvider, Lease};
-pub use repository::Repository;
-pub use transaction::Transaction;
+pub use crate::action::blocking::{Action, ActionExecutor, ActionExecutorBuilder};
+pub use crate::distributed_jobs::blocking::DistributedJob;
+pub use crate::keyed_lock::blocking::{KeyedLockProvider, Lease};
+pub use crate::local_event_handler::blocking::EventHandler;
+pub use crate::persistence::blocking::{Db, Dbs, Transaction};
+pub use crate::repository::blocking::Repository;
 
 use std::future::Future;
 use std::sync::OnceLock;

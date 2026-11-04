@@ -9,7 +9,7 @@ use sea_query::{
 use sea_query_sqlx::SqlxValues;
 use sqlx::AssertSqlSafe;
 
-use crate::connection::{Pool, PooledConnection};
+use crate::persistence::{Pool, PooledConnection};
 use crate::{Dialect, Error, Record, Scalar};
 
 /// Where statements run and which SQL to write for them: jOOQ's `DSLContext`. On a pool, each

@@ -1,32 +1,15 @@
+//! The SQL of the ready-made methods, as Java's jOOQ calls write it; shared by both kinds of
+//! repository.
+
 use sea_query::{
     Asterisk, Expr, ExprTrait, Func, Iden, InsertStatement, Query, SelectStatement,
     UpdateStatement, Value, Values,
 };
 use uuid::Uuid;
 
-use crate::{
-    DatabaseRegistry, Dialect, Error, Persistable, Record, ShardIdentifier, ShardKey,
-    ShardingStrategy,
-};
+use crate::Dialect;
 
-/// A table, as schemagen writes it: its name and the columns the ready-made methods use.
-pub trait Table: Iden + PartialEq + Copy + Send + Sync + 'static {
-    const TABLE: Self;
-    const ID: Self;
-    const VERSION: Self;
-    const STATE: Self;
-    const COLUMNS: &'static [Self];
-}
-
-/// One row of a table, as schemagen writes it: read by sqlx, written as column-value pairs.
-pub trait TableRecord: Record + 'static {
-    type Table: Table;
-
-    fn values(&self) -> Vec<(Self::Table, Value)>;
-}
-
-pub(crate) type TableOf<R> = <<R as AbstractRepository>::Record as TableRecord>::Table;
-pub(crate) type IdOf<R> = <<R as AbstractRepository>::Persistable as Persistable>::Id;
+use super::{Table, TableRecord};
 
 /// `state <> 'DELETED'`: Java's private `notDeleted()`. Only the ready-made methods use it;
 /// custom queries write their own condition when they want one.
@@ -183,57 +166,4 @@ pub(crate) fn update_all_sql<R: TableRecord>(dialect: Dialect, records: &[R]) ->
         }
     };
     (sql, Values(values))
-}
-
-/// Java's `AbstractRepository` (and its `ModelRepository` / `EntityRepository`, which differ
-/// only in what they store). An implementation says where the databases are, how a row becomes
-/// a model or entity and back (`from_record` / `to_record`, as in Java) and, if it shards, its
-/// `sharding_strategy`; the selectors and the ready-made methods below work from that, with
-/// Java's SQL.
-pub trait AbstractRepository: Send + Sync {
-    type Persistable: Persistable;
-    type Record: TableRecord;
-
-    fn registry(&self) -> &DatabaseRegistry;
-    fn from_record(record: Self::Record) -> Result<Self::Persistable, Error>;
-    fn to_record(persistable: &Self::Persistable) -> Self::Record;
-
-    /// How ids name shards: `NoSharding` unless overridden, as Java's repositories default to
-    /// `NoShardingStrategy`.
-    fn sharding_strategy(&self) -> ShardingStrategy {
-        ShardingStrategy::NoSharding
-    }
-
-    /// The shard a key names through this repository's strategy, or the default shard; then the
-    /// registry's unknown-shard policy. Java's `effectiveShard(...)`.
-    fn effective_shard(&self, key: impl ShardKey) -> Result<ShardIdentifier, Error> {
-        let registry = self.registry();
-        let shard = key
-            .resolve(self.sharding_strategy())
-            .unwrap_or_else(|| registry.default_shard());
-        registry.effective_shard(shard)
-    }
-
-    /// The one shard all `models` are on: Java's `effectiveShard(Collection)`, which refuses
-    /// models on two shards with `CrossShardException`.
-    fn shard_of_all(&self, models: &[Self::Persistable]) -> Result<ShardIdentifier, Error> {
-        if self.sharding_strategy() == ShardingStrategy::NoSharding {
-            return Ok(self.registry().default_shard());
-        }
-        let mut first = None;
-        for model in models {
-            let shard = self.effective_shard(model.id())?;
-            match first {
-                None => first = Some(shard),
-                Some(first) if first != shard => {
-                    return Err(Error::CrossShard {
-                        first,
-                        second: shard,
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(first.unwrap_or_else(|| self.registry().default_shard()))
-    }
 }

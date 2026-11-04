@@ -174,13 +174,15 @@ Judgement calls made while porting, for the user to confirm or overturn. Newest 
 The user chose to wrap the async code (not a second, synchronous database driver), then
 Python's naming, then explicit folders for both sides: `blocking` and `aio`.
 
-1. **Three places.** `ekbatan::blocking` (folder `ekbatan/src/blocking/`) holds the blocking
-   API under plain names: `Action`, `ActionExecutor`, `Repository`, `Db`, `Dbs`, `Transaction`,
-   `KeyedLockProvider`, `Lease`, `DistributedJob`, `EventHandler`, plus `runtime()` and
-   `block_on`. `ekbatan::aio` (`ekbatan/src/aio/`) holds the `Async*` twins. The topic modules
-   (`action/`, `repository.rs`, `keyed_lock.rs`, ...) hold only what both share: `ActionPlan`,
-   the registries, `AbstractRepository`, config, the lock providers, the job scheduler. Test
-   support: `ekbatan_test_support::blocking::ActionSpec` and `aio::AsyncActionSpec`.
+1. **Where things are.** One folder per topic, as Java's packages (`domain`, `config`,
+   `persistence`, `repository`, `action`, `keyed_lock`, `distributed_jobs`,
+   `local_event_handler`, `json`). Inside a topic the two kinds sit side by side, as redis-rs
+   keeps `aio` next to its sync code: `<topic>/blocking` and `<topic>/aio` (a file, or a folder
+   when it holds more than one type). `ekbatan::blocking` and `ekbatan::aio` gather them, so an
+   app imports from one explicit place; the twins are reachable only there. Test support:
+   `ekbatan_test_support::blocking::ActionSpec` and `aio::AsyncActionSpec`.
+   Public paths that moved: `RepositoryRegistry` is in `ekbatan::repository` (Java's package);
+   the rest are also re-exported at the crate root as before.
 2. **Why `blocking`, not `sync`**: Rust's usual word (`reqwest::blocking`, tokio's
    `spawn_blocking`); `sync` reads as `std::sync` (locks, `Arc`) and the `Sync` marker. `aio`
    is Python's name and redis-rs's. (`ekbatan::async` is impossible: a reserved word.)

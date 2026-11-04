@@ -5,37 +5,32 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
 
 ## Layout
 
-- `ekbatan/` - the framework crate.
-  - `config.rs` `DataSourceConfig`: how to reach one database, its pool sizes, driver settings.
-  - `sharding_config.rs` `ShardingConfig`, `EkbatanConfig`: Java's `ekbatan:` config section.
-  - `connection.rs` `ConnectionProvider` (one database's pool) and `Connection` (one held connection).
-  - `transaction.rs` `TransactionManager` (one shard's pools and transactions) and `Transaction`.
-  - `registry.rs` `DatabaseRegistry`: every shard's `TransactionManager`.
-  - `db.rs` `Db`: where statements run and which SQL to write (jOOQ's `DSLContext`).
-  - `action/` `ActionPlan`, the registries, `ExecutionConfiguration`,
-    and the event log (`EventPersister`, `eventlog.events`).
-  - `migration.rs` `Migrator`: Java's `FlywayMigrator` on sqlx's migrator (Flyway file names).
-  - `distributed_jobs/` `JobRegistry`, `DistributedJob`: run-once-per-slot jobs on
-    `scheduled_tasks` (db-scheduler's design, our code).
-  - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
-    `eventlog.event_notifications`.
-  - `aio/` the async twins, `Async*` (Python's `ekbatan.aio`): `AsyncAction`,
-    `AsyncActionExecutor`, `AsyncRepository`, `AsyncDb`, `AsyncTransaction`,
-    `AsyncTransactionManager`, `AsyncDatabaseRegistry`, `AsyncKeyedLockProvider`, `AsyncLease`,
-    `AsyncDistributedJob`, `AsyncEventHandler`. They are the engine.
-  - `blocking/` the blocking twins under the plain names (Rust's `reqwest::blocking`):
-    `Action`, `ActionExecutor`, `Repository`, `Db`, `Transaction`, `KeyedLockProvider`, `Lease`,
-    `DistributedJob`, `EventHandler`; they wait on `aio`, on `blocking::runtime()`, and
-    `blocking::block_on` runs any async call from blocking code. The topic modules hold only what
-    both share.
-  - `keyed_lock.rs` `KeyedLockProvider`: in-process and database keyed locks.
-  - `json.rs` JSON as Java's Jackson writes it (event payloads, action params).
-  - `domain.rs` `Model`, `Entity`, `Persistable`, `ModelEvent`, their bases and builder bases, `Id`.
-  - `repository.rs` `AbstractRepository` (what a repository says about itself, Java's name;
-    `blocking::Repository` and `aio::AsyncRepository` give it its methods).
+- `ekbatan/` - the framework crate. One folder per topic, as Java's packages; inside a topic,
+  the blocking and async kinds sit side by side as `blocking` and `aio` submodules.
+  `ekbatan::blocking` and `ekbatan::aio` (`blocking.rs`, `aio.rs`) only gather them.
+  - `domain/` `Model`, `Entity`, `ModelEvent`, `Id`, `GenericState`, their bases and builder bases.
   - `shard.rs` `ShardIdentifier`, `ShardedId` (Java's `ShardedUUID` bit layout), `ShardingStrategy`, `ShardKey`.
-  - `types.rs` `DbUuid`: UUID columns on every database (Java's `UuidStringConverter`).
-  - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`.
+  - `config/` `DataSourceConfig` (`data_source.rs`), `ShardingConfig` / `EkbatanConfig` (`sharding.rs`).
+  - `persistence/` `ConnectionProvider`, `TransactionManager`, `DatabaseRegistry`, `Dialect`,
+    `DbUuid`; `blocking/` (`Db`, `Transaction`) and `aio/` (`AsyncDb`, `AsyncTransaction`, the
+    `.as_async()` views).
+  - `repository/` `AbstractRepository`, `Table`, `TableRecord`, `RepositoryRegistry`, the SQL of
+    the ready-made methods (`sql.rs`); `blocking.rs` (`Repository`), `aio.rs` (`AsyncRepository`).
+  - `action/` `ActionPlan`, `ActionRegistry`, `ExecutionConfiguration`, the event log
+    (`event_persister.rs`); `blocking/` (`Action`, `ActionExecutor`), `aio/` (`AsyncAction`,
+    `AsyncActionExecutor`: the engine).
+  - `migration.rs` `Migrator`: Java's `FlywayMigrator` on sqlx's migrator (Flyway file names).
+  - `keyed_lock/` `lock_key_hash`, `InProcessKeyedLockProvider`, `SqlKeyedLockProvider`;
+    `blocking.rs` (`KeyedLockProvider`, `Lease`), `aio.rs` (`AsyncKeyedLockProvider`, `AsyncLease`).
+  - `distributed_jobs/` `JobRegistry` (`registry.rs`), `ExecutionContext` (`context.rs`),
+    `Schedule`, the `scheduled_tasks` SQL (`store.rs`); `blocking.rs` (`DistributedJob`), `aio.rs`
+    (`AsyncDistributedJob`). db-scheduler's design, our code.
+  - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
+    `eventlog.event_notifications`; `blocking.rs` (`EventHandler`), `aio.rs` (`AsyncEventHandler`).
+  - `json/` JSON as Java's Jackson writes it (event payloads, action params); `ids.rs` for ids.
+  - `blocking.rs` gathers the blocking API, with its tokio `runtime()` and `block_on`; `aio.rs`
+    gathers the async API.
+  - `clock.rs` `Clock`, `SystemClock`, `Instant` (UTC), `truncate_to_micros`; `error.rs` `Error`.
 - `ekbatan-macros/` - `#[model]`, `#[entity]`, `#[model_event]`: what Java's superclasses and
   `@AutoBuilder` give a class (the `base` field, the builder, `copy()`, `next_version()`).
 - `ekbatan-schemagen/` - generates the app's `schema.rs` in `build.rs` from a Docker database

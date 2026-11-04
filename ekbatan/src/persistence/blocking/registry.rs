@@ -1,7 +1,7 @@
 //! `DatabaseRegistry`'s statements and `close()`, waited on. `aio::AsyncDatabaseRegistry` is the
 //! async twin.
 
-use super::{Db, Dbs, block_on};
+use crate::blocking::{Db, Dbs, block_on};
 use crate::{DatabaseRegistry, Error, ShardIdentifier};
 
 impl DatabaseRegistry {

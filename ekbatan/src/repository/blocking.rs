@@ -3,8 +3,8 @@
 
 use sea_query::Condition;
 
-use super::{Db, Dbs, Transaction, block_on};
 use crate::aio::AsyncRepository;
+use crate::blocking::{Db, Dbs, Transaction, block_on};
 use crate::repository::IdOf;
 use crate::{AbstractRepository, Error, ShardKey};
 

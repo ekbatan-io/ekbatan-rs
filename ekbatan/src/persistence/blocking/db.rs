@@ -2,8 +2,8 @@
 
 use sea_query::{InsertStatement, IntoIden, QueryStatementWriter, SelectStatement};
 
-use super::block_on;
 use crate::aio::{AsyncDb, AsyncDbs};
+use crate::blocking::block_on;
 use crate::{Dialect, Error, Record, Scalar};
 
 /// Where statements run and which SQL to write: jOOQ's `DSLContext`. Its async twin is

@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use super::{block_on, runtime};
 use crate::Error;
 use crate::aio::{AsyncKeyedLockProvider, AsyncLease};
+use crate::blocking::{block_on, runtime};
 
 /// A keyed lock: Java's `KeyedLockProvider`. Implemented for every `AsyncKeyedLockProvider`
 /// (its async twin).

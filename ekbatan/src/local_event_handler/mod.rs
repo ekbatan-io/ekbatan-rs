@@ -11,6 +11,8 @@
 //!
 //! Each handler gets each event at least once: a handler must be idempotent.
 
+pub(crate) mod aio;
+pub(crate) mod blocking;
 mod config;
 mod handler;
 mod jobs;

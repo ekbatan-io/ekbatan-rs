@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use ekbatan::action::{
     ActionPlan, ActionRegistry, EventEntity, EventEntityRepository, ExecutionConfiguration,
-    RepositoryRegistry, RetryConfig, RetryOn,
+    RetryConfig, RetryOn,
 };
 use ekbatan::aio::{AsyncAction, AsyncActionExecutor, AsyncRepository};
+use ekbatan::repository::RepositoryRegistry;
 
 use ekbatan::{
     Clock, DatabaseRegistry, Dialect, Error, Model, Persistable, ShardIdentifier, SystemClock,
