@@ -3335,6 +3335,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wallet-service-blocking-pg"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "ekbatan",
+ "ekbatan-schemagen",
+ "rust_decimal",
+ "sea-query",
+ "serde",
+ "sqlx",
+ "testcontainers-modules",
+ "uuid",
+]
+
+[[package]]
 name = "want"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

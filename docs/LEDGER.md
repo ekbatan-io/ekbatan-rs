@@ -106,5 +106,5 @@ Web framework: axum. Each example: README, migrations, `ekbatan.json`, schema ge
 | 11c | `axum-wallet-rest-sharded-pg`: two PostgreSQL servers, `MX` wallets on the Mexico shard, routing by id (Java's example; neither Java's nor Python's has a transfer endpoint) | done (EKB-0023) |
 | 11d | `axum-wallet-saga-pg`: transfer as three event-chained steps, compensation, 202 | done (EKB-0024) |
 | 11e | `job-worker-pg`: no HTTP, blocking jobs once per slot, clean shutdown | done (EKB-0025) |
-| 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | |
+| 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | done (EKB-0026) |
 | 11g | `ekbatan-rs-examples/README.md` and a check that the per-database copies stay identical | |
