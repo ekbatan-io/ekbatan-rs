@@ -12,6 +12,7 @@ members = [
     "ekbatan-rs-examples/axum-wallet-rest-mariadb",
     "ekbatan-rs-examples/axum-wallet-rest-sharded-pg",
     "ekbatan-rs-examples/axum-wallet-saga-pg",
+    "ekbatan-rs-examples/job-worker-pg",
 ]
 # The examples are members (one lock file, so the 2-week pins hold for them too) but not
 # default members: `cargo build` / `cargo test` at the root are the framework's. Build an
@@ -67,6 +68,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 testcontainers-modules = { version = "0.15.0", features = ["postgres", "mysql", "mariadb"] }
 opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "metrics", "testing"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std", "ansi", "env-filter"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "=1.28.0", features = ["v4", "serde"] }

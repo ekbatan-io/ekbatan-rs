@@ -287,3 +287,34 @@ user chose TLS via rustls.
 
 Also fixed in the same commit: EKB-0015's bulk rename had turned `Error::Action` (an app's own
 error) into `Error::AsyncAction`; it is `Error::Action` again.
+
+## Item 11: examples (2026-11-04)
+
+1. **axum** for the HTTP examples: the usual Rust choice (from the tokio team). 0.8.9, past
+   the 2-week rule; it and its crates were already in the lock file.
+2. **Where they live**: `ekbatan-rs-examples/<name>`, each its own crate. Members of the root
+   workspace (one lock file, so the 2-week pins cover them) but not default members: `cargo
+   test` at the root stays the framework's; an example builds with `-p <name>`.
+3. **The set** (Rust has one build tool, so no build-tool axis as Java and Python have):
+   `axum-wallet-rest-{pg,mysql,mariadb}` (async), `axum-wallet-rest-sharded-pg`,
+   `axum-wallet-saga-pg`, `job-worker-pg` (blocking), and `wallet-service-blocking-pg` (to
+   come). The blocking API is shown by the worker and the start-here service, rather than a
+   blocking twin of every HTTP example (Python has async twins of all of its).
+4. **The MySQL and MariaDB copies are written** from the PostgreSQL one by
+   `ekbatan-rs-examples/sync-examples.py` (`--check` fails when they drift), as Python's
+   examples are. Only the URL scheme, the migrations, the schema generator's database and the
+   test container differ; a copy's `migrations/` is its own.
+5. **Logins in tests**: the MySQL and MariaDB examples log in as `wallet` with a password (an
+   `init.sql` grants it every database, as Java's examples do, since the first migration
+   creates `eventlog`). That is the path TLS (EKB-0021) opened.
+6. **The sharded example follows Java's**: one wallet per shard, rows checked on each database.
+   Neither Java's nor Python's sharded example has a transfer endpoint; the "cross-shard
+   transfer answered 422" line in Python's examples index matches no code.
+7. **Logging**: the examples print `tracing` logs with `tracing-subscriber` (0.3.23, March
+   2026; its five new crates all past the 2-week rule), `info` by default with sqlx's
+   "already exists" notices quieted. A dependency of the examples only, not of `ekbatan`.
+8. **Framework change found by the worker**: "Job '…' execution started/finished" was logged at
+   INFO on every run, flooding the log for a 2-second job; now DEBUG, as db-scheduler logs it.
+9. **The worker polls every second** (`ekbatan.jobs.pollingInterval: PT1S`): a job runs when it
+   is due *and* the scheduler polls, so with the default 10s a 2-second job runs about every
+   10 seconds. Java's example keeps 10s; its README's "every 2s" is true only of the schedule.

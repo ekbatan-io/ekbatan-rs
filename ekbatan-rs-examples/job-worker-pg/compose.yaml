@@ -1,0 +1,12 @@
+# The database `cargo run` talks to, with the login and database `ekbatan.json` defaults to.
+# `docker compose up -d` starts it; `docker compose down` removes it.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet
+      TZ: UTC
+    ports:
+      - "5432:5432"

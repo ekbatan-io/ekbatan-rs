@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::context::HeartbeatState;
@@ -389,11 +389,11 @@ impl Shared {
             heartbeat,
             stopping: self.stopping.clone(),
         };
-        info!("Job '{name}' execution started");
+        debug!("Job '{name}' execution started");
         let outcome = job.job.execute(&ctx).await;
         let done = self.clock.instant();
         match &outcome {
-            Ok(()) => info!("Job '{name}' execution finished"),
+            Ok(()) => debug!("Job '{name}' execution finished"),
             Err(e) => error!("Job '{name}' execution failed: {e}"),
         }
         let next = job.schedule.next_execution(done);

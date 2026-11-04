@@ -6,6 +6,14 @@ use ekbatan::EkbatanConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Logs to stderr: `info` unless RUST_LOG says otherwise (RUST_LOG=ekbatan=debug, ...).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,sqlx::postgres::notice=warn")
+            }),
+        )
+        .init();
     let path = std::env::var("EKBATAN_CONFIG").unwrap_or_else(|_| "ekbatan.json".to_owned());
     let config = EkbatanConfig::load_json(&path)?;
     let app = App::start(&config).await?;
