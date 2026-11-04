@@ -27,6 +27,8 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
     (`AsyncDistributedJob`). db-scheduler's design, our code.
   - `local_event_handler/` handlers for our own events: fan-out and handling jobs on
     `eventlog.event_notifications`; `blocking.rs` (`EventHandler`), `aio.rs` (`AsyncEventHandler`).
+  - `telemetry.rs` OpenTelemetry spans and metrics under Java's scopes, names and attributes
+    (API only; no-op until the app installs an SDK).
   - `json/` JSON as Java's Jackson writes it (event payloads, action params); `ids.rs` for ids.
   - `blocking.rs` gathers the blocking API, with its tokio `runtime()` and `block_on`; `aio.rs`
     gathers the async API.

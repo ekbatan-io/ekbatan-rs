@@ -4,6 +4,7 @@
 use std::any::TypeId;
 use std::sync::Arc;
 
+use opentelemetry::KeyValue;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -13,6 +14,7 @@ use crate::action::plan::{ActionPlan, AnyChanges};
 use crate::action::{ActionRegistry, action_name};
 use crate::aio::AsyncAction;
 use crate::repository::RepositoryRegistry;
+use crate::telemetry::{FutureExt, Span, transaction_span};
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 type ShardChanges = Vec<(TypeId, Box<dyn AnyChanges>)>;
@@ -68,13 +70,24 @@ impl AsyncActionExecutor {
         let principal_name = principal.unwrap_or("");
         let start_time = self.clock.instant();
         info!("Executing {name} [principal={principal_name}]");
+        let span = Span::start(
+            "ekbatan.action.execute",
+            vec![
+                KeyValue::new("ekbatan.action.name", name),
+                KeyValue::new("ekbatan.action.principal", principal_name.to_owned()),
+            ],
+        );
         let mut retry_count = 0;
         loop {
             let attempt = self
                 .attempt(&*action, name, principal, &params, execution_configuration)
+                .with_context(span.context())
                 .await;
             let error = match attempt {
                 Ok(result) => {
+                    // Set once, with the final count: the SDK keeps every value set.
+                    span.set("ekbatan.action.retry.count", i64::from(retry_count));
+                    span.set("ekbatan.action.outcome", "success");
                     let took = self.clock.instant() - start_time;
                     info!(
                         "{name} completed in {}ms [principal={principal_name}]",
@@ -95,6 +108,9 @@ impl AsyncActionExecutor {
                     tokio::time::sleep(config.delay).await;
                 }
                 _ => {
+                    span.set("ekbatan.action.retry.count", i64::from(retry_count));
+                    span.set("ekbatan.action.outcome", "error");
+                    span.fail(&error);
                     error!("{name} failed: {error}");
                     return Err(error);
                 }
@@ -112,15 +128,27 @@ impl AsyncActionExecutor {
     ) -> Result<A::Result, Error> {
         let action_start_date = self.clock.instant();
         let mut plan = ActionPlan::new();
-        let result = action.perform(&mut plan, principal, params).await?;
-        self.persist_changes(
-            name,
-            plan,
-            params,
-            action_start_date,
-            execution_configuration,
-        )
-        .await?;
+        let result = {
+            let span = Span::start("ekbatan.action.perform", Vec::new());
+            let performed = action
+                .perform(&mut plan, principal, params)
+                .with_context(span.context())
+                .await;
+            span.finish(performed)?
+        };
+        let span = Span::start("ekbatan.action.persist", Vec::new());
+        let persisted = self
+            .persist_changes(
+                name,
+                plan,
+                params,
+                action_start_date,
+                execution_configuration,
+                &span,
+            )
+            .with_context(span.context())
+            .await;
+        span.finish(persisted)?;
         Ok(result)
     }
 
@@ -131,6 +159,7 @@ impl AsyncActionExecutor {
         params: &P,
         action_start_date: Instant,
         execution_configuration: &ExecutionConfiguration,
+        span: &Span,
     ) -> Result<(), Error> {
         let action_params = serialize_action_params(params)?;
         let mut changes_by_shard = self.group_changes_by_shard(plan)?;
@@ -153,6 +182,7 @@ impl AsyncActionExecutor {
                     second: changes_by_shard[1].0,
                 });
             }
+            span.set("ekbatan.shard.cross_shard", true);
             warn!(
                 "{name} spans {} shards: {:?} [allowCrossShard=true]",
                 changes_by_shard.len(),
@@ -183,6 +213,14 @@ impl AsyncActionExecutor {
                          Data on committed shards remains persisted and will NOT roll back \
                          automatically."
                     );
+                    span.set("ekbatan.shard.partial_commit_failure", true);
+                    let committed: Vec<String> =
+                        committed_shards.iter().map(ToString::to_string).collect();
+                    span.set(
+                        "ekbatan.shard.committed_shards",
+                        format!("[{}]", committed.join(", ")),
+                    );
+                    span.set("ekbatan.shard.failed_shard", shard.to_string());
                 }
                 return Err(error);
             }
@@ -193,6 +231,30 @@ impl AsyncActionExecutor {
 
     /// One shard's transaction: Java's `ChangePersister.persist` inside `inTransactionChecked`.
     async fn persist_shard(
+        &self,
+        name: &'static str,
+        action_params: &str,
+        action_start_date: Instant,
+        shard: ShardIdentifier,
+        changes: &ShardChanges,
+        action_event_id: Uuid,
+    ) -> Result<(), Error> {
+        let span = transaction_span(shard);
+        let written = self
+            .persist_shard_in_transaction(
+                name,
+                action_params,
+                action_start_date,
+                shard,
+                changes,
+                action_event_id,
+            )
+            .with_context(span.context())
+            .await;
+        span.finish(written)
+    }
+
+    async fn persist_shard_in_transaction(
         &self,
         name: &'static str,
         action_params: &str,

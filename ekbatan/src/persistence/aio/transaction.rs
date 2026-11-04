@@ -1,6 +1,7 @@
 //! `AsyncTransaction` and `AsyncTransactionManager`: transactions waited on with `.await`.
 //! `blocking::Transaction` and `TransactionManager::begin` / `in_transaction` are the blocking twins.
 
+use crate::telemetry::{FutureExt, transaction_span};
 use crate::{AsyncDb, Connection, Dialect, Error, ShardIdentifier, TransactionManager};
 
 /// A shard's transactions, waited on with `.await`: the async twin of `TransactionManager`'s
@@ -26,17 +27,23 @@ impl<'a> AsyncTransactionManager<'a> {
         &self,
         block: impl AsyncFnOnce(&mut AsyncTransaction) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let mut tx = self.begin().await?;
-        match block(&mut tx).await {
-            Ok(value) => {
-                tx.commit().await?;
-                Ok(value)
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
+        let span = transaction_span(self.0.shard_identifier());
+        let result = async {
+            let mut tx = self.begin().await?;
+            match block(&mut tx).await {
+                Ok(value) => {
+                    tx.commit().await?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    Err(error)
+                }
             }
         }
+        .with_context(span.context())
+        .await;
+        span.finish(result)
     }
 }
 

@@ -78,7 +78,7 @@ the database), linted, and committed before the next starts.
 | 8 | Local event handler: listen to our own events | `ekbatan-events/local-event-handler`; py `events/` | done (EKB-0014) |
 | 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | done (EKB-0012, EKB-0013); Redis lock open |
 | 9b | Blocking and async APIs side by side: `ekbatan::blocking` (`Action`, `ActionExecutor`, `Repository`, `Db`, `Transaction`, locks, jobs, handlers, `ActionSpec`) and `ekbatan::aio` (`Async*`) | py sync API and `ekbatan.aio` | done (EKB-0015..0017) |
-| 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | |
+| 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | done (EKB-0019) |
 | 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | |
 | 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | |
 

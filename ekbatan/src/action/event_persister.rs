@@ -10,6 +10,9 @@ use sea_query::{Alias, Asterisk, Expr, ExprTrait, IntoIden, Query, SimpleExpr};
 use uuid::Uuid;
 
 use crate::AsyncDb;
+use opentelemetry::KeyValue;
+
+use crate::telemetry::{FutureExt, Span};
 use crate::{AnyModelEvent, AsyncTransaction, DbUuid, Dialect, Error, Instant, ShardIdentifier};
 
 /// One event as the event log receives it: the event and the model it belongs to.
@@ -85,44 +88,59 @@ impl EventPersister for SingleTableJsonEventPersister {
         _shard: ShardIdentifier,
         action_event_id: Uuid,
     ) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(async move {
-            let mut rows = Vec::new();
-            if model_events.is_empty() {
-                rows.push(EventEntity {
-                    id: Uuid::new_v4(),
-                    namespace: namespace.to_owned(),
-                    action_id: action_event_id,
-                    action_name: action_name.to_owned(),
-                    action_params: action_params.to_owned(),
-                    started_date,
-                    completion_date,
-                    model_id: None,
-                    model_type: None,
-                    event_type: None,
-                    payload: None,
-                    event_date: completion_date,
-                    delivered: false,
-                });
+        let span = Span::start(
+            "ekbatan.event.persist",
+            vec![
+                KeyValue::new("ekbatan.action.name", action_name.to_owned()),
+                KeyValue::new("ekbatan.event.count", model_events.len() as i64),
+            ],
+        );
+        let cx = span.context();
+        Box::pin(
+            async move {
+                let written = async {
+                    let mut rows = Vec::new();
+                    if model_events.is_empty() {
+                        rows.push(EventEntity {
+                            id: Uuid::new_v4(),
+                            namespace: namespace.to_owned(),
+                            action_id: action_event_id,
+                            action_name: action_name.to_owned(),
+                            action_params: action_params.to_owned(),
+                            started_date,
+                            completion_date,
+                            model_id: None,
+                            model_type: None,
+                            event_type: None,
+                            payload: None,
+                            event_date: completion_date,
+                            delivered: false,
+                        });
+                    }
+                    for emitted in model_events {
+                        rows.push(EventEntity {
+                            id: Uuid::new_v4(),
+                            namespace: namespace.to_owned(),
+                            action_id: action_event_id,
+                            action_name: action_name.to_owned(),
+                            action_params: action_params.to_owned(),
+                            started_date,
+                            completion_date,
+                            model_id: Some(emitted.model_id.to_owned()),
+                            model_type: Some(emitted.model_name.to_owned()),
+                            event_type: Some(self.event_type_name(emitted.event)?.to_owned()),
+                            payload: Some(event_payload(emitted)?),
+                            event_date: completion_date,
+                            delivered: false,
+                        });
+                    }
+                    EventEntityRepository::add_all_no_result(&mut tx.db(), &rows).await
+                }
+                .await;
+                span.finish(written)
             }
-            for emitted in model_events {
-                rows.push(EventEntity {
-                    id: Uuid::new_v4(),
-                    namespace: namespace.to_owned(),
-                    action_id: action_event_id,
-                    action_name: action_name.to_owned(),
-                    action_params: action_params.to_owned(),
-                    started_date,
-                    completion_date,
-                    model_id: Some(emitted.model_id.to_owned()),
-                    model_type: Some(emitted.model_name.to_owned()),
-                    event_type: Some(self.event_type_name(emitted.event)?.to_owned()),
-                    payload: Some(event_payload(emitted)?),
-                    event_date: completion_date,
-                    delivered: false,
-                });
-            }
-            EventEntityRepository::add_all_no_result(&mut tx.db(), &rows).await
-        })
+            .with_context(cx),
+        )
     }
 }
 

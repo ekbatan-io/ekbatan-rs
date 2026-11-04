@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
+use opentelemetry::KeyValue;
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -13,6 +14,7 @@ use super::notification::{EventNotification, EventNotificationRepository, EventN
 use crate::action::EventEntityRepository;
 use crate::aio::AsyncDistributedJob;
 use crate::distributed_jobs::{ExecutionContext, Schedule};
+use crate::telemetry::local_event_handler_meter;
 use crate::{Clock, DatabaseRegistry, Error, Instant, ShardIdentifier, SystemClock};
 
 const BASE: Duration = Duration::from_secs(30);
@@ -97,7 +99,7 @@ impl EventFanoutJob {
                 EventEntityRepository::find_undelivered(&mut tx.db(), &handled, self.batch_size)
                     .await?;
             if events.is_empty() {
-                return Ok(0);
+                return Ok((0, 0));
             }
             let now = self.clock.instant();
             let mut notifications = Vec::new();
@@ -130,13 +132,34 @@ impl EventFanoutJob {
             EventNotificationRepository::add_all_no_result(&mut tx.db(), &notifications).await?;
             let ids: Vec<Uuid> = events.iter().map(|e| e.id).collect();
             EventEntityRepository::mark_delivered(&mut tx.db(), &ids).await?;
-            Ok::<usize, Error>(events.len())
+            Ok::<(usize, usize), Error>((events.len(), notifications.len()))
         }
         .await;
         match result {
-            Ok(count) => {
+            Ok((events, notifications)) => {
                 tx.commit().await?;
-                Ok(count)
+                if events > 0 {
+                    let meter = local_event_handler_meter();
+                    meter
+                        .u64_counter("ekbatan.events.fanned_out")
+                        .with_description(
+                            "Source events transitioned from undelivered to delivered by the \
+                             fan-out job",
+                        )
+                        .with_unit("{event}")
+                        .build()
+                        .add(events as u64, &[]);
+                    meter
+                        .u64_counter("ekbatan.events.notifications_created")
+                        .with_description(
+                            "Notification rows materialized by the fan-out job (one per event x \
+                             subscribed handler)",
+                        )
+                        .with_unit("{notification}")
+                        .build()
+                        .add(notifications as u64, &[]);
+                }
+                Ok(events)
             }
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -303,6 +326,47 @@ impl EventHandlingJob {
             EventNotificationRepository::mark_failed_bucket(&mut db, &ids(rows), next, after)
                 .await?;
         }
+        let meter = local_event_handler_meter();
+        let handled = meter
+            .u64_counter("ekbatan.events.handled")
+            .with_description(
+                "Notification rows processed by the event-handling job, tagged by outcome",
+            )
+            .with_unit("{notification}")
+            .build();
+        let record = |rows: &[&EventNotification], outcome: &'static str| {
+            let mut by_handler: BTreeMap<&str, u64> = BTreeMap::new();
+            for n in rows {
+                *by_handler.entry(&n.handler_name).or_default() += 1;
+            }
+            for (handler, count) in by_handler {
+                handled.add(
+                    count,
+                    &[
+                        KeyValue::new("outcome", outcome),
+                        KeyValue::new("handler", handler.to_owned()),
+                    ],
+                );
+            }
+        };
+        record(&preflight_expired, "expired_preflight");
+        record(&succeeded, "succeeded");
+        record(&failed_expired, "expired_postfailure");
+        for rows in retry_by_attempts.values() {
+            record(rows, "failed_retry");
+        }
+        let lag = meter
+            .f64_histogram("ekbatan.events.delivery.lag")
+            .with_description("Age of the source event when its handler succeeded")
+            .with_unit("s")
+            .build();
+        for n in &succeeded {
+            let age = (after - n.event_date).to_std().unwrap_or_default();
+            lag.record(
+                age.as_secs_f64(),
+                &[KeyValue::new("handler", n.handler_name.clone())],
+            );
+        }
         self.log_discarded(
             &failed_expired,
             "exhausted the retention window after repeated handler failures",
@@ -314,8 +378,27 @@ impl EventHandlingJob {
         Ok(notifications.len())
     }
 
-    /// Runs one notification's handler. True on success.
+    /// Runs one notification's handler, timing it (`ekbatan.events.handler.duration`, by handler
+    /// and `succeeded` / `failed`; wall-clock time, not the injected clock). True on success.
     async fn invoke(&self, n: &EventNotification) -> bool {
+        let started = std::time::Instant::now();
+        let ok = self.invoke_handler(n).await;
+        local_event_handler_meter()
+            .f64_histogram("ekbatan.events.handler.duration")
+            .with_description("Wall-clock duration of a single event-handler invocation")
+            .with_unit("s")
+            .build()
+            .record(
+                started.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("handler", n.handler_name.clone()),
+                    KeyValue::new("outcome", if ok { "succeeded" } else { "failed" }),
+                ],
+            );
+        ok
+    }
+
+    async fn invoke_handler(&self, n: &EventNotification) -> bool {
         let Some(handler) = self.event_handler_registry.handler_for(&n.handler_name) else {
             warn!(
                 "No handler registered with name: {} (event {})",

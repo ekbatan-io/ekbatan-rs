@@ -16,6 +16,8 @@ uuid.workspace = true
 [dev-dependencies]
 ekbatan-test-support = { path = "../ekbatan-test-support" }
 futures-util.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
 serde_json = { workspace = true }
 testcontainers-modules.workspace = true
 tokio.workspace = true

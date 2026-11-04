@@ -3,6 +3,7 @@
 
 use crate::aio::AsyncTransaction;
 use crate::blocking::{Db, block_on, runtime};
+use crate::telemetry::transaction_span;
 use crate::{Error, ShardIdentifier, TransactionManager};
 
 impl TransactionManager {
@@ -18,17 +19,23 @@ impl TransactionManager {
         &self,
         block: impl FnOnce(&mut Transaction) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let mut transaction = self.begin()?;
-        match block(&mut transaction) {
-            Ok(value) => {
-                transaction.commit()?;
-                Ok(value)
+        let span = transaction_span(self.shard_identifier());
+        let attached = span.context().attach();
+        let result = (|| {
+            let mut transaction = self.begin()?;
+            match block(&mut transaction) {
+                Ok(value) => {
+                    transaction.commit()?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = transaction.rollback();
+                    Err(error)
+                }
             }
-            Err(error) => {
-                let _ = transaction.rollback();
-                Err(error)
-            }
-        }
+        })();
+        drop(attached);
+        span.finish(result)
     }
 }
 

@@ -214,3 +214,31 @@ Python's naming, then explicit folders for both sides: `blocking` and `aio`.
 10. **The wallet example stays async** (`AsyncAction`, `AsyncRepository`), as it was written;
     `wallet-example/tests/blocking.rs` shows the blocking API end to end.
 11. Always compiled; no cargo feature (it adds no dependency).
+
+## Item 10: OpenTelemetry (2026-11-04)
+
+1. **Java's telemetry, name for name**: spans under scope `io.ekbatan.core`
+   (`ekbatan.action.execute` / `.perform` / `.persist`, `ekbatan.transaction`,
+   `ekbatan.event.persist`, `ekbatan.repository` on batch inserts and updates) with Java's
+   attributes, and the local event handler's five metrics under
+   `io.ekbatan.events.localeventhandler` (`ekbatan.events.fanned_out`,
+   `.notifications_created`, `.handled`, `.handler.duration`, `.delivery.lag`) with Java's
+   `outcome` / `handler` values. A failed span gets status `ERROR` and an exception event. The
+   list is in `ekbatan/src/telemetry.rs`.
+2. **OpenTelemetry's API directly, not `tracing` spans.** Many Rust apps trace with the
+   `tracing` crate and bridge to OpenTelemetry; that would make the span names and attributes
+   depend on the bridge. Using the API (as Java and Python do) keeps them exact and needs no
+   bridge. Logs stay on `tracing`. Say if you would rather have `tracing` spans.
+3. **Only the API is a dependency** (`opentelemetry` 0.33.1, released 2026-10-09, so past the
+   2-week rule; nothing else entered the lock file). It does nothing until the app installs an
+   SDK, like Java's `GlobalOpenTelemetry`. The SDK (`opentelemetry_sdk` 0.33.1) is only a test
+   dependency, with in-memory exporters.
+4. **`ekbatan.action.retry.count` is set once, with the final count.** Java overwrites it per
+   attempt; the Rust SDK keeps every value set, so per-attempt setting would export duplicates.
+5. Instruments are asked for each time they are used, so a provider the app installs after
+   building the jobs still counts (Java's are static).
+6. The instrumentation scope version is the crate's version (Java uses its artifact's).
+7. Tested on the three databases (`wallet-example/tests/telemetry.rs`): names, attributes,
+   nesting, error status, retries (from a blocking action), cross-shard, both
+   `in_transaction`s, and all five metrics. Not tested: the partial-commit attributes (they need
+   a shard to fail after another committed); they are set next to the existing alarm log.

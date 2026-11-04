@@ -11,7 +11,10 @@ use uuid::Uuid;
 use crate::repository::sql::{
     count_from, insert_of, not_deleted, select_from, select_one_from, update_all_sql, update_of,
 };
+use opentelemetry::KeyValue;
+
 use crate::repository::{IdOf, TableOf};
+use crate::telemetry::Span;
 use crate::{
     AbstractRepository, AsyncDb, AsyncDbs, AsyncTransaction, Dialect, Error, ModelId, Persistable,
     ShardIdentifier, ShardKey, ShardingStrategy, Table,
@@ -182,12 +185,17 @@ pub trait AsyncRepository: AbstractRepository {
             if models.is_empty() {
                 return Ok(());
             }
-            let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
-            let shard = self.shard_of_all(models)?;
-            AsyncRepository::tx_db_else_db(self, tx, shard)?
-                .execute(&insert_of(&records))
-                .await?;
-            Ok(())
+            let span = batch_span::<Self>("BATCH_INSERT", models.len());
+            let written = async {
+                let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
+                let shard = self.shard_of_all(models)?;
+                AsyncRepository::tx_db_else_db(self, tx, shard)?
+                    .execute(&insert_of(&records))
+                    .await?;
+                Ok(())
+            }
+            .await;
+            span.finish(written)
         }
     }
 
@@ -291,28 +299,34 @@ pub trait AsyncRepository: AbstractRepository {
         models: &[Self::Persistable],
     ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
-            match models {
-                [] => return Ok(()),
-                [model] => return AsyncRepository::update_no_result(self, tx, model).await,
-                _ => {}
+            if models.is_empty() {
+                return Ok(());
             }
-            let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
-            let shard = self.shard_of_all(models)?;
-            let mut db = AsyncRepository::tx_db_else_db(self, tx, shard)?;
-            let (mut sql, values) = update_all_sql(db.dialect(), &records);
-            if db.dialect() == Dialect::Postgres {
-                let returning = sql.rfind(" RETURNING ").expect("written above");
-                sql.truncate(returning);
+            let span = batch_span::<Self>("BATCH_UPDATE", models.len());
+            let written = async {
+                if let [model] = models {
+                    return AsyncRepository::update_no_result(self, tx, model).await;
+                }
+                let records: Vec<Self::Record> = models.iter().map(Self::to_record).collect();
+                let shard = self.shard_of_all(models)?;
+                let mut db = AsyncRepository::tx_db_else_db(self, tx, shard)?;
+                let (mut sql, values) = update_all_sql(db.dialect(), &records);
+                if db.dialect() == Dialect::Postgres {
+                    let returning = sql.rfind(" RETURNING ").expect("written above");
+                    sql.truncate(returning);
+                }
+                let affected = db.execute_sql(sql, values).await? as usize;
+                if affected != models.len() {
+                    return Err(Error::StaleRecords {
+                        table: TableOf::<Self>::TABLE.to_string(),
+                        expected: models.len(),
+                        updated: affected,
+                    });
+                }
+                Ok(())
             }
-            let affected = db.execute_sql(sql, values).await? as usize;
-            if affected != models.len() {
-                return Err(Error::StaleRecords {
-                    table: TableOf::<Self>::TABLE.to_string(),
-                    expected: models.len(),
-                    updated: affected,
-                });
-            }
-            Ok(())
+            .await;
+            span.finish(written)
         }
     }
 
@@ -510,3 +524,18 @@ pub trait AsyncRepository: AbstractRepository {
 }
 
 impl<R: AbstractRepository + ?Sized> AsyncRepository for R {}
+
+/// `ekbatan.repository`, for a batch write: Java's span on `addAllNoResult` / `updateAllNoResult`.
+fn batch_span<R: AbstractRepository + ?Sized>(operation: &'static str, size: usize) -> Span {
+    Span::start(
+        "ekbatan.repository",
+        vec![
+            KeyValue::new("db.operation.name", operation),
+            KeyValue::new(
+                "ekbatan.entity.type",
+                <R::Persistable as Persistable>::model_name(),
+            ),
+            KeyValue::new("ekbatan.batch.size", size as i64),
+        ],
+    )
+}

@@ -30,6 +30,7 @@ pub mod migration;
 pub mod persistence;
 pub mod repository;
 pub mod shard;
+pub mod telemetry;
 
 pub use clock::{Clock, Instant, SystemClock, truncate_to_micros};
 pub use config::{
