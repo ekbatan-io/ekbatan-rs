@@ -41,6 +41,9 @@ The Rust port of [Ekbatan](https://github.com/ekbatan-io/ekbatan) (Java) and its
   `blocking::ActionSpec`, `aio::AsyncActionSpec`.
 - `wallet-example/` - the wallet model, schema, repositories, actions, migrations
   (`migrations/<database>`, Java's files), and the tests on real databases.
+- `ekbatan-rs-examples/` - standalone example apps (workspace members, not default members:
+  build one with `-p`). The `-pg` REST project is the source of its MySQL and MariaDB copies:
+  `python3 ekbatan-rs-examples/sync-examples.py` (`--check` in CI).
 - `age-pins/` - no code: exact pins that hold transitive crates to the 2-week rule.
 - `docs/LEDGER.md` - what is done, what is next, and decisions taken.
 - `docs/DECISIONS-TO-REVIEW.md` - judgement calls waiting for the user.

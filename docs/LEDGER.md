@@ -79,7 +79,7 @@ the database), linted, and committed before the next starts.
 | 9 | Distributed jobs and keyed locks (locks on a held `Connection`, own pool) | `ekbatan-distributed-jobs`, `concurrent/`; py `distributedjobs/`, `locks/` | done (EKB-0012, EKB-0013); Redis lock open |
 | 9b | Blocking and async APIs side by side: `ekbatan::blocking` (`Action`, `ActionExecutor`, `Repository`, `Db`, `Transaction`, locks, jobs, handlers, `ActionSpec`) and `ekbatan::aio` (`Async*`) | py sync API and `ekbatan.aio` | done (EKB-0015..0017) |
 | 10 | OpenTelemetry tracing and metrics | `TRACER` spans; py `_tracing.py`, `_metrics.py` | done (EKB-0019) |
-| 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | |
+| 11 | Example apps (`ekbatan-rs-examples`), web framework integration | `ekbatan-examples`; `ekbatan-py-examples` | done (EKB-0022..0027) |
 | 12 | Docs, website, GitHub Actions (CI on the three databases, dependency checks, release) | `docs/`, `website/`, `.github/` in both | |
 
 ## Differences from Java to keep in mind
@@ -107,4 +107,4 @@ Web framework: axum. Each example: README, migrations, `ekbatan.json`, schema ge
 | 11d | `axum-wallet-saga-pg`: transfer as three event-chained steps, compensation, 202 | done (EKB-0024) |
 | 11e | `job-worker-pg`: no HTTP, blocking jobs once per slot, clean shutdown | done (EKB-0025) |
 | 11f | `wallet-service-blocking-pg`: start here, blocking API, plain `fn main` | done (EKB-0026) |
-| 11g | `ekbatan-rs-examples/README.md` and a check that the per-database copies stay identical | |
+| 11g | `ekbatan-rs-examples/README.md` and a check that the per-database copies stay identical | done (EKB-0022, EKB-0027) |
